@@ -1,0 +1,47 @@
+# Byte-compiled / optimized Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Houdini generated files
+*.otlc
+*.hda
+*.hdk
+*.hbc
+*.i3d
+*.hip/.gitkeep
+*.hip/.*
+autosave/
+Backup/
+backup/
+
+# Depth map output
+depth_maps/
+depth_*.png
+depth_*.tiff
+depth_*.exr
+depth_map.png
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Package install artifacts
+# (uncomment if you want to track your local .otlc)
+# HDAs/*.otlc
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*

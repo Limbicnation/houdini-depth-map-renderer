@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ln -sf /home/gero/.openclaw/skills/terminalskills-skills-houdini ~/.claude/skills/houdini)"
+    ]
+  }
+}
