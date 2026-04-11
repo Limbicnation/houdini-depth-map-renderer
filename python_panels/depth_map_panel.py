@@ -97,7 +97,7 @@ def _output_dir(settings: dict, key: str = "output_path",
     return path
 
 
-def _filename(settings: dict, prefix: str, frame: int = None) -> str:
+def _filename(settings: dict, prefix: str, frame: int | None = None) -> str:
     if frame is not None and settings.get("animation"):
         fname = f"{prefix}_{frame:05d}"
     else:
@@ -124,7 +124,7 @@ def _notify(node: hou.Node, severity: hou.severityType, msg: str):
 # COP2 network builders
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_depth_network(node: hou.COP2Node, settings: dict):
+def build_depth_network(node: hou.Node, settings: dict):
     """
     Build the depth-map COP2 pipeline.
     Mirrors Blender's depth compositor exactly.
@@ -145,8 +145,9 @@ def build_depth_network(node: hou.COP2Node, settings: dict):
 
     norm = settings.get("normalization", "LINEAR")
     inv  = settings.get("invert", True)
-    near = settings.get("near", 0.1) * settings.get("scale_factor", 1.0)
-    far  = settings.get("far",  1000.0) * settings.get("scale_factor", 1.0)
+    near = settings.get("near", 0.1)
+    far  = settings.get("far",  1000.0)
+    sf   = settings.get("scale_factor", 1.0)
 
     # ── 1. Z-Depth Source ─────────────────────────────────────────────────
     src = node.createNode("cop2::deep",              NODE_PREFIX + "Source")
@@ -154,21 +155,22 @@ def build_depth_network(node: hou.COP2Node, settings: dict):
     src.setPosition(hou.Vector2(0, 0))
 
     # ── 2. Depth Normalization ────────────────────────────────────────────
+    norm_steps = {"RAW": 0, "LINEAR": 1, "LOGARITHMIC": 2}
+    norm_node_count = norm_steps.get(norm, 1)
+    STEP = 200
+
     if norm == "RAW":
-        # No MapRange — pass raw Z directly
         normalize = src
-        normalize_out = src
     elif norm == "LOGARITHMIC":
-        # Log normalize: more detail in near field
         log_node = node.createNode("cop2::ln",          NODE_PREFIX + "LOG")
         log_node.setLabel("Log Normalize")
-        log_node.setPosition(hou.Vector2(200, 0))
+        log_node.setPosition(hou.Vector2(STEP, 0))
         log_node.setInput(0, src, 0)
         log_node.parm("affectalpha").set(False)
 
         rmap = node.createNode("cop2::range",   NODE_PREFIX + "RangeMap")
         rmap.setLabel("Log Range Mapper")
-        rmap.setPosition(hou.Vector2(400, 0))
+        rmap.setPosition(hou.Vector2(STEP * 2, 0))
         log_min = 0.0
         log_max = math.log(max(far, 0.001))
         rmap.parm("from_min").set(log_min)
@@ -176,52 +178,53 @@ def build_depth_network(node: hou.COP2Node, settings: dict):
         rmap.parm("to_min").set(1.0 if inv else 0.0)
         rmap.parm("to_max").set(0.0 if inv else 1.0)
         normalize   = rmap
-        normalize_out = rmap
     else:
-        # LINEAR (default) — classic MapRange
         rmap = node.createNode("cop2::range",   NODE_PREFIX + "RangeMap")
         rmap.setLabel("Depth Range Mapper")
-        rmap.setPosition(hou.Vector2(200, 0))
+        rmap.setPosition(hou.Vector2(STEP, 0))
         rmap.parm("from_min").set(near)
         rmap.parm("from_max").set(far)
         rmap.parm("to_min").set(1.0 if inv else 0.0)
         rmap.parm("to_max").set(0.0 if inv else 1.0)
         normalize   = rmap
-        normalize_out = rmap
 
     # ── 3. Brightness (v2.0) ─────────────────────────────────────────────
+    x = (norm_node_count + 1) * STEP
     bright = node.createNode("cop2::brightness",  NODE_PREFIX + "Brightness")
     bright.setLabel("Brightness")
-    bright.setPosition(hou.Vector2({"RAW": 200, "LOGARITHMIC": 600, "LINEAR": 400}.get(norm, 400), 0))
+    bright.setPosition(hou.Vector2(x, 0))
     bright.parm("brightness").set(settings.get("brightness", 0.0))
     bright.setInput(0, normalize, 0)
 
     # ── 4. Contrast (v2.0 — separate from brightness) ───────────────────
+    x += STEP
     ctr = node.createNode("cop2::contrast",       NODE_PREFIX + "Contrast")
     ctr.setLabel("Depth Contrast")
-    ctr.setPosition(hou.Vector2(600, 0))
+    ctr.setPosition(hou.Vector2(x, 0))
     ctr.parm("gain").set(1.0 + settings.get("contrast", 0.2))
     ctr.setInput(0, bright, 0)
 
     # ── 5. Scale Factor (v2.0) ────────────────────────────────────────────
-    # Blender uses MapRange's scale; in COP2 we multiply
+    x += STEP
     scale = node.createNode("cop2::multiply",     NODE_PREFIX + "Scale")
     scale.setLabel("Depth Scale")
-    scale.setPosition(hou.Vector2(800, 0))
-    scale.parm("scale1").set(settings.get("scale_factor", 1.0))
+    scale.setPosition(hou.Vector2(x, 0))
+    scale.parm("scale1").set(sf)
     scale.setInput(0, ctr, 0)
 
     # ── 6. Grayscale ──────────────────────────────────────────────────────
+    x += STEP
     gray = node.createNode("cop2::convert",        NODE_PREFIX + "Grayscale")
     gray.setLabel("Grayscale Output")
-    gray.setPosition(hou.Vector2(1000, 0))
+    gray.setPosition(hou.Vector2(x, 0))
     gray.parm("copoutput").set("bw")
     gray.setInput(0, scale, 0)
 
     # ── 7a. File Output ──────────────────────────────────────────────────
+    x += STEP
     fout = node.createNode("cop2::file_output",  NODE_PREFIX + "FileOut")
     fout.setLabel("Depth File Output")
-    fout.setPosition(hou.Vector2(1200, 0))
+    fout.setPosition(hou.Vector2(x, 0))
     odir  = _output_dir(settings, "output_path", "depth_maps")
     fname = _filename(settings, "depth_map")
     fout.parm("file").set(os.path.join(odir, fname))
@@ -233,7 +236,7 @@ def build_depth_network(node: hou.COP2Node, settings: dict):
     if settings.get("preview", False):
         viewer = node.createNode("cop2::viewer",  NODE_PREFIX + "Viewer")
         viewer.setLabel("Depth Preview")
-        viewer.setPosition(hou.Vector2(1200, 100))
+        viewer.setPosition(hou.Vector2(x, 100))
         viewer.setInput(0, gray, 0)
 
     node.setDisplayNode(fout)
@@ -241,7 +244,7 @@ def build_depth_network(node: hou.COP2Node, settings: dict):
     return fout
 
 
-def build_mask_network(node: hou.COP2Node, settings: dict):
+def build_mask_network(node: hou.Node, settings: dict):
     """
     Build the mask export COP2 pipeline.
     Independent of depth — can run without depth being set up.
@@ -315,7 +318,7 @@ class OpSetup:
     script_label = "limbic.setup_depth_map"
 
     @staticmethod
-    def execute(node: hou.COP2Node, mask_only: bool = False) -> bool:
+    def execute(node: hou.Node, mask_only: bool = False) -> bool:
         settings = _load(node)
         try:
             if mask_only:
@@ -339,7 +342,7 @@ class OpRender:
     script_label = "limbic.render_depth_map"
 
     @staticmethod
-    def execute(node: hou.COP2Node, animation: bool = False,
+    def execute(node: hou.Node, animation: bool = False,
                mask: bool = False) -> bool:
         try:
             settings = _load(node)
@@ -365,11 +368,11 @@ class OpRender:
                 _notify(node, hou.severityType.Important,
                         f"Depth Map: rendering {len(frames)} {prefix} frames…")
 
+            odir = _output_dir(settings,
+                                "mask_output_path" if mask else "output_path",
+                                "mask_maps" if mask else "depth_maps")
             for frame in frames:
                 hou.setFrame(frame)
-                odir  = _output_dir(settings,
-                                     "mask_output_path" if mask else "output_path",
-                                     "mask_maps" if mask else "depth_maps")
                 fname = _filename(settings,
                                    "mask_map" if mask else "depth_map",
                                    frame=frame)
@@ -390,7 +393,7 @@ class OpReset:
     script_label = "limbic.reset_depth_map"
 
     @staticmethod
-    def execute(node: hou.COP2Node, mask_only: bool = False) -> bool:
+    def execute(node: hou.Node, mask_only: bool = False) -> bool:
         try:
             for n in _dm_children(node):
                 if mask_only and not n.name().startswith(NODE_PREFIX + "M"):
@@ -402,7 +405,6 @@ class OpReset:
                 settings["mask_setup_complete"] = False
             else:
                 settings["setup_complete"] = False
-                settings["mask_setup_complete"] = False
             _save(node, settings)
 
             _notify(node, hou.severityType.Important,
@@ -776,6 +778,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
 def register_operators():
     pass
+
 
 def unregister_operators():
     pass

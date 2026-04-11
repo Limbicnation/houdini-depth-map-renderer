@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os, sys, json, argparse, tarfile, io
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 SRC_ROOT = Path(__file__).parent.resolve()
 
@@ -27,7 +27,7 @@ HDA_METADATA = {
     "table":           "Driver/cop2",
     "label":           "Depth Map Renderer",
     "category":        "Limic",
-    "version":         (1, 0, 0),
+    "version":         (2, 0, 0),
     "min_houdini":     (18, 0),
     "python":          True,
     "python_module":   "python_panels.depth_map_panel",
@@ -70,7 +70,7 @@ def _hda_archive(otlc_path: Path, src_root: Path):
 
     # 1. Contents manifest
     manifest = {
-        "build_date":    datetime.utcnow().isoformat() + "Z",
+        "build_date":    datetime.now(timezone.utc).isoformat(),
         "build_host":    os.environ.get("HOSTNAME", "unknown"),
         "metadata":      HDA_METADATA,
         "cop2_nodes":    COP2_NODES,

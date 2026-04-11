@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ln -sf /home/gero/.openclaw/skills/terminalskills-skills-houdini ~/.claude/skills/houdini)"
+      "Bash(ln -sf /home/gero/.openclaw/skills/terminalskills-skills-houdini ~/.claude/skills/houdini)",
+      "Bash(python3 -m py_compile python_panels/depth_map_panel.py)",
+      "Bash(python3 -m py_compile build.py)",
+      "Bash(python3 -m py_compile installer/install.py)",
+      "Bash(python3 -m py_compile config/shelf_actions.py)"
     ]
   }
 }
