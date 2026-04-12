@@ -422,16 +422,32 @@ class OpReset:
 
 class DepthMapPanel:
 
+    def __init__(self):
+        self.node = None
+        try:
+            self.node = self._resolve_node()
+            if self.node is not None:
+                self._ensure_parm()
+        except Exception:
+            self.node = None
+
+    def _resolve_node(self):
+        try:
+            pane = hou.ui.curPaneTab()
+            if pane and pane.type() == hou.paneTabType.CompositorViewer:
+                n = pane.pwd() if hasattr(pane, "pwd") else None
+                if n is not None:
+                    return n
+        except Exception:
+            pass
+        return self._find_hda()
+
     def onCreate(self):
-        pane = hou.ui.curPaneTab()
-        self.node = pane if pane and pane.type() == hou.paneTabType.COP2 else None
-        if self.node is None:
-            self.node = self._find_hda()
+        self.node = self._resolve_node()
         self._ensure_parm()
 
     def onRevive(self):
-        pane = hou.ui.curPaneTab()
-        self.node = pane if pane and pane.type() == hou.paneTabType.COP2 else None
+        self.node = self._resolve_node()
         self._ensure_parm()
 
     def onActiveNodeChanged(self, kwargs):
@@ -439,13 +455,39 @@ class DepthMapPanel:
         self._ensure_parm()
 
     def _find_hda(self):
-        for n in hou.node("/obj").allSubChildren():
-            try:
-                if n.type().name() == "limbic_depth_map_renderer":
-                    return n
-            except Exception:
-                pass
+        for root in [hou.node("/obj"), hou.node("/img")]:
+            if root is None:
+                continue
+            for n in root.allSubChildren():
+                try:
+                    if n.type().name() == "limbic_depth_map_renderer":
+                        return n
+                except Exception:
+                    pass
         return None
+
+    def _ensure_node(self):
+        if self.node is not None:
+            return True
+        self.node = self._find_hda()
+        if self.node is not None:
+            self._ensure_parm()
+            return True
+        try:
+            img = hou.node("/img")
+            if img is None:
+                img = hou.node("/obj").createNode("img", "img")
+            net = img.createNode("cop2net", "depth_map1")
+            net.moveToGoodPosition()
+            self.node = net
+            self._ensure_parm()
+            return True
+        except hou.OperationFailed as e:
+            hou.ui.displayMessage(
+                f"Could not create Depth Map network:\n{e}",
+                severity=hou.severityType.Error,
+            )
+            return False
 
     def _ensure_parm(self):
         if self.node is None:
@@ -468,13 +510,7 @@ class DepthMapPanel:
             _save(self.node, settings)
 
     def buildUI(self, parent_widget):
-        try:
-            from PySide2 import QtWidgets, QtCore, QtGui
-        except ImportError:
-            try:
-                from PySide6 import QtWidgets, QtCore, QtGui
-            except ImportError:
-                from PySide2 import QtWidgets, QtCore, QtGui
+        from hutil.Qt import QtWidgets, QtCore
         _build_ui(self, parent_widget, QtWidgets, QtCore)
 
 
@@ -714,50 +750,50 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     def _on_setup():
         s = _collect()
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpSetup.execute(panel.node, mask_only=False)
 
     def _on_render():
         s = _collect()
         s["animation"] = False
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=False, mask=False)
 
     def _on_anim():
         s = _collect()
         s["animation"] = True
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=True, mask=False)
 
     def _on_reset():
-        if panel.node:
+        if panel._ensure_node():
             OpReset.execute(panel.node, mask_only=False)
 
     def _on_mask_setup():
         s = _collect()
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpSetup.execute(panel.node, mask_only=True)
 
     def _on_mask_render():
         s = _collect()
         s["animation"] = False
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=False, mask=True)
 
     def _on_mask_anim():
         s = _collect()
         s["animation"] = True
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=True, mask=True)
 
     def _on_mask_reset():
-        if panel.node:
+        if panel._ensure_node():
             OpReset.execute(panel.node, mask_only=True)
 
     btn_setup.clicked.connect(_on_setup)
@@ -782,3 +818,12 @@ def register_operators():
 
 def unregister_operators():
     pass
+
+
+def createInterface():
+    from hutil.Qt import QtWidgets
+    root = QtWidgets.QWidget()
+    panel = DepthMapPanel()
+    panel.buildUI(root)
+    root._depth_map_panel = panel
+    return root

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Background -->
+  <rect width="64" height="64" fill="none"/>
+  
+  <!-- COP2 Node body -->
+  <rect x="8" y="6" width="48" height="40" rx="4" ry="4" fill="#2a2a2a" stroke="#888" stroke-width="1.5"/>
+  
+  <!-- "D" letter -->
+  <text x="32" y="34" font-family="Arial, Helvetica, sans-serif" font-size="26" font-weight="700" fill="#ffffff" text-anchor="middle">D</text>
+  
+  <!-- Depth gradient bar -->
+  <defs>
+    <linearGradient id="depthGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="50" width="28" height="8" rx="2" ry="2" fill="url(#depthGrad)" stroke="#666" stroke-width="0.75"/>
+</svg>

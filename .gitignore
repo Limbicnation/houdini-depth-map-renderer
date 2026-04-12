@@ -45,3 +45,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.sublime-*
+
+# Git worktrees
+.kilo/
