@@ -103,9 +103,6 @@ def _build_pypanel_xml(panel_source: str) -> str:
     help_url="https://github.com/limbicnation/houdini-depth-map-renderer">
     <script><![CDATA[
 {panel_source}
-
-def createInterface():
-    return DepthMapPanel()
 ]]></script>
   </interface>
 </pythonPanelDocument>

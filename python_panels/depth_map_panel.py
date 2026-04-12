@@ -519,16 +519,32 @@ class OpReset:
 
 class DepthMapPanel:
 
+    def __init__(self):
+        self.node = None
+        try:
+            self.node = self._resolve_node()
+            if self.node is not None:
+                self._ensure_parm()
+        except Exception:
+            self.node = None
+
+    def _resolve_node(self):
+        try:
+            pane = hou.ui.curPaneTab()
+            if pane and pane.type() == hou.paneTabType.CompositorViewer:
+                n = pane.pwd() if hasattr(pane, "pwd") else None
+                if n is not None:
+                    return n
+        except Exception:
+            pass
+        return self._find_hda()
+
     def onCreate(self):
-        pane = hou.ui.curPaneTab()
-        self.node = pane if pane and pane.type() == hou.paneTabType.CompositorViewer else None
-        if self.node is None:
-            self.node = self._find_hda()
+        self.node = self._resolve_node()
         self._ensure_parm()
 
     def onRevive(self):
-        pane = hou.ui.curPaneTab()
-        self.node = pane if pane and pane.type() == hou.paneTabType.CompositorViewer else None
+        self.node = self._resolve_node()
         self._ensure_parm()
 
     def onActiveNodeChanged(self, kwargs):
@@ -536,12 +552,16 @@ class DepthMapPanel:
         self._ensure_parm()
 
     def _find_hda(self):
+        container_types = {"copnet", "cop2net"}
         for root in [hou.node("/obj"), hou.node("/img")]:
             if root is None:
                 continue
             for n in root.allSubChildren():
                 try:
-                    if n.type().name() == "limbic_depth_map_renderer":
+                    tname = n.type().name()
+                    if tname == "limbic_depth_map_renderer":
+                        return n
+                    if tname in container_types and n.parm("dm_settings") is not None:
                         return n
                 except Exception:
                     pass
@@ -590,13 +610,7 @@ class DepthMapPanel:
             _save(self.node, settings)
 
     def buildUI(self, parent_widget):
-        try:
-            from PySide2 import QtWidgets, QtCore, QtGui
-        except ImportError:
-            try:
-                from PySide6 import QtWidgets, QtCore, QtGui
-            except ImportError:
-                from PySide2 import QtWidgets, QtCore, QtGui
+        from hutil.Qt import QtWidgets, QtCore
         _build_ui(self, parent_widget, QtWidgets, QtCore)
 
 
@@ -904,3 +918,12 @@ def register_operators():
 
 def unregister_operators():
     pass
+
+
+def createInterface():
+    from hutil.Qt import QtWidgets
+    root = QtWidgets.QWidget()
+    panel = DepthMapPanel()
+    panel.buildUI(root)
+    root._depth_map_panel = panel
+    return root
