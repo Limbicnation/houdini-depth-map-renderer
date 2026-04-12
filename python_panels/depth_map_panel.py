@@ -243,6 +243,7 @@ def build_depth_network(node: hou.Node, settings: dict):
             rmap.parm("to_min").set(1.0 if inv else 0.0)
             rmap.parm("to_max").set(0.0 if inv else 1.0)
         normalize = rmap
+        rmap.setInput(0, log_node, 0)
     else:
         rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
         rmap.setLabel("Depth Range Mapper")
