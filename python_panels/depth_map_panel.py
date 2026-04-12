@@ -34,10 +34,9 @@ def _backend() -> str:
     global _COP_BACKEND
     if _COP_BACKEND is None:
         try:
-            img = hou.node("/img")
-            if img is not None:
-                test = img.createNode("copnet", "__backend_probe")
-                test.destroy()
+            cats = hou.nodeTypeCategories()
+            cop_net = cats.get("CopNet")
+            if cop_net is not None and "copnet" in cop_net.nodeTypes():
                 _COP_BACKEND = "cop"
             else:
                 _COP_BACKEND = "cop2"
@@ -536,13 +535,38 @@ class DepthMapPanel:
         self._ensure_parm()
 
     def _find_hda(self):
-        for n in hou.node("/obj").allSubChildren():
-            try:
-                if n.type().name() == "limbic_depth_map_renderer":
-                    return n
-            except Exception:
-                pass
+        for root in [hou.node("/obj"), hou.node("/img")]:
+            if root is None:
+                continue
+            for n in root.allSubChildren():
+                try:
+                    if n.type().name() == "limbic_depth_map_renderer":
+                        return n
+                except Exception:
+                    pass
         return None
+
+    def _ensure_node(self):
+        if self.node is not None:
+            return True
+        self.node = self._find_hda()
+        if self.node is not None:
+            self._ensure_parm()
+            return True
+        try:
+            img = hou.node("/img")
+            if img is None:
+                img = hou.node("/obj").createNode("img", "img")
+            net = img.createNode(_container_type(), "depth_map1")
+            net.moveToGoodPosition()
+            self.node = net
+            self._ensure_parm()
+            return True
+        except hou.OperationFailed as e:
+            hou.ui.displayMessage(
+                f"Could not create Depth Map network:\n{e}",
+                severity=hou.severityType.Error)
+            return False
 
     def _ensure_parm(self):
         if self.node is None:
@@ -811,50 +835,50 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     def _on_setup():
         s = _collect()
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpSetup.execute(panel.node, mask_only=False)
 
     def _on_render():
         s = _collect()
         s["animation"] = False
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=False, mask=False)
 
     def _on_anim():
         s = _collect()
         s["animation"] = True
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=True, mask=False)
 
     def _on_reset():
-        if panel.node:
+        if panel._ensure_node():
             OpReset.execute(panel.node, mask_only=False)
 
     def _on_mask_setup():
         s = _collect()
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpSetup.execute(panel.node, mask_only=True)
 
     def _on_mask_render():
         s = _collect()
         s["animation"] = False
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=False, mask=True)
 
     def _on_mask_anim():
         s = _collect()
         s["animation"] = True
-        panel._save(s)
-        if panel.node:
+        if panel._ensure_node():
+            panel._save(s)
             OpRender.execute(panel.node, animation=True, mask=True)
 
     def _on_mask_reset():
-        if panel.node:
+        if panel._ensure_node():
             OpReset.execute(panel.node, mask_only=True)
 
     btn_setup.clicked.connect(_on_setup)
