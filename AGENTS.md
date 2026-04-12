@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Limbic Depth Map Renderer ports Blender Depth Map Generator v2.0 to Houdini. Two independent COP2 pipelines (depth compositor + ComfyUI mask exporter) accessed via a Python Panel UI.
+Limbic Depth Map Renderer ports Blender Depth Map Generator v2.0 to Houdini. Two independent compositing pipelines (depth + ComfyUI mask exporter) accessed via a Python Panel UI. Dual COP backend: COP2 for H18-H20, new COP for H21+.
 
-- **Version**: 2.0.0 | **License**: Apache 2.0 | **Min Houdini**: 18.0 | **Language**: Python 3.9+
+- **Version**: 2.1.0 | **License**: Apache 2.0 | **Min Houdini**: 18.0 (COP2) / 21.0 (new COP) | **Language**: Python 3.9+
 
 ## Build / Lint / Test Commands
 
@@ -29,7 +29,7 @@ python3 -m py_compile config/shelf_actions.py
 There is **no headless test suite** — the plugin requires Houdini's GUI and `hou` module. Manual testing checklist:
 
 1. Open Houdini → import HDA: `File → Import → HDA File…` → select `HDAs/limbic_depth_map_renderer.otlc`
-2. Create COP2 network: right-click → `Material → Compose`
+2. Create COP network: right-click → `Material → Compose`
 3. Drop HDA onto network → open Composite Desk → Depth Map panel
 4. Test each pipeline independently:
    - **Depth**: Setup → Render → verify output files → Reset
@@ -80,7 +80,7 @@ import hou
 ### Type Annotations
 - Use type hints for function signatures where `hou` types are involved:
   ```python
-  def build_depth_network(node: hou.COP2Node, settings: dict):
+  def build_depth_network(node: hou.Node, settings: dict):
   def _save(node: hou.Node, settings: dict):
   def _output_dir(settings: dict, key: str = "output_path",
                   fallback: str = "depth_maps") -> str:
@@ -95,7 +95,7 @@ import hou
 | Private module functions | `_lower_snake` | `_load()`, `_save()`, `_dm_children()` |
 | Operator classes | `Op{Name}` (PascalCase with Op prefix) | `OpSetup`, `OpRender`, `OpReset` |
 | Operator methods | `@staticmethod` named `execute` | `OpSetup.execute(node, mask_only=False)` |
-| COP2 node names | `DM_` prefix + PascalCase | `DM_Source`, `DM_RangeMap`, `DM_FileOut` |
+| COP node names | `DM_` prefix + PascalCase | `DM_Source`, `DM_RangeMap`, `DM_FileOut` |
 | Mask pipeline nodes | `DM_M` prefix | `DM_MSource`, `DM_MGrayscale`, `DM_MaskFileOut` |
 | Settings keys | `lower_snake` | `"normalization"`, `"scale_factor"`, `"mask_enabled"` |
 | Qt widget variables | `lower_snake` with type hint | `combo_norm`, `spin_near`, `btn_setup` |
@@ -171,22 +171,22 @@ _save(node, settings)         # write back
 | `README.md` | End-user documentation |
 | `CLAUDE.md` | Claude Code specific guidance |
 
-## COP2 Node Reference
+## COP Node Reference (Dual Backend)
 
-| Node Type | Role |
-|---|---|
-| `cop2::deep` | Read Z from Mantra deep raster |
-| `cop2::range` | Linear depth normalization (MapRange) |
-| `cop2::ln` | Natural log (LOGARITHMIC mode preprocessor) |
-| `cop2::brightness` | Additive brightness offset |
-| `cop2::contrast` | Multiplicative gain (contrast) |
-| `cop2::multiply` | Scale factor |
-| `cop2::convert` | RGBA ↔ BW conversion |
-| `cop2::file_output` | PNG/TIFF/EXR writer |
-| `cop2::viewer` | Interactive preview |
-| `cop2::idtopmask` | Object Index → BW mask |
-| `cop2::cryptomatte` | Cryptomatte AOV reader |
-| `cop2::constant` | Solid color constant (RGBA mask white fill) |
+| Semantic Key | COP2 (H18-H20) | New COP (H21+) | Role |
+|---|---|---|---|
+| `source` | `cop2::deep` | `file` | Z-depth input |
+| `range` | `cop2::range` | `remap` | Linear depth normalization |
+| `log` | `cop2::ln` | `function` | Natural log (LOGARITHMIC mode) |
+| `brightness` | `cop2::brightness` | `bright` | Additive brightness offset |
+| `contrast` | `cop2::contrast` | `contrast` | Multiplicative gain |
+| `scale` | `cop2::multiply` | `function` | Scale factor |
+| `grayscale` | `cop2::convert` | `mono` | RGBA → BW conversion |
+| `file_output` | `cop2::file_output` | `rop_image` | PNG/TIFF/EXR writer |
+| `viewer` | `cop2::viewer` | `output` | Display marker |
+| `idtomask` | `cop2::idtopmask` | `idtomask` | Object Index → mask |
+| `cryptomatte` | `cop2::cryptomatte` | `cryptomatte` | Cryptomatte AOV reader |
+| `convert_rgba` | `cop2::convert` | `monotorgba` | Mono → RGBA conversion |
 
 ## Environment Variables
 

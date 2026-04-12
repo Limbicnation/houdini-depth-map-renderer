@@ -59,7 +59,7 @@ def _is_fake_otlc(path: Path) -> bool:
 
 def _build_shelf_xml(installer_path: Path) -> str:
     """Build the .shelf XML for the one-click installer shelf tool."""
-    script = f"""import hou
+    script = f"""import hou, runpy
 from pathlib import Path
 
 INSTALLER = Path(r"{installer_path}")
@@ -71,27 +71,21 @@ if not INSTALLER.exists():
         title="Depth Map Installer",
     )
 else:
-    src = INSTALLER.read_text().replace(
-        "REPO = Path(__file__).parent.resolve()",
-        f"REPO = Path(r'{{INSTALLER.parent}}')"
+    runpy.run_path(str(INSTALLER), run_name="__main__")
+    hou.ui.displayMessage(
+        "Depth Map panel installed.\\n\\nOpen it via: any pane [+] → Python Panel → Depth Map",
+        title="Depth Map Installer",
     )
-    exec(compile(src, str(INSTALLER), 'exec'))
-
-    ifaces = hou.pypanel.interfaces()
-    if "LimbicDepthMapRenderer" in ifaces:
-        desktop = hou.ui.curDesktop()
-        fp = desktop.createFloatingPanel(hou.paneTabType.PythonPanel)
-        tab = fp.paneTabOfType(hou.paneTabType.PythonPanel)
-        tab.setActiveInterface(ifaces["LimbicDepthMapRenderer"])
 """
     return f'''<?xml version="1.0" encoding="UTF-8"?>
 <shelfDocument>
   <!-- Limbic Depth Map Renderer installer shelf tool -->
-  <tool name="limbic_depth_map_install" label="Depth Map" icon="COP2_depth">
+  <tool name="limbic_depth_map_install" label="Depth Map" icon="MISC_python">
     <toolMenuContext name="viewer">
       <contextNetType>OBJ</contextNetType>
       <contextNetType>SOP</contextNetType>
       <contextNetType>COP2</contextNetType>
+      <contextNetType>COP</contextNetType>
     </toolMenuContext>
     <script scriptType="python"><![CDATA[
 {script}]]></script>
@@ -109,6 +103,9 @@ def _build_pypanel_xml(panel_source: str) -> str:
     help_url="https://github.com/limbicnation/houdini-depth-map-renderer">
     <script><![CDATA[
 {panel_source}
+
+def createInterface():
+    return DepthMapPanel()
 ]]></script>
   </interface>
 </pythonPanelDocument>
@@ -189,7 +186,7 @@ def install(prefs: Path | None = None) -> None:
     print("    1. Shelf: drag 'Depth Map' tool from toolbar → click it")
     print("    OR")
     print("    2. Any pane tab → [+] New Pane Tab → Python Panel → Depth Map")
-    print("    3. For full COP2 integration: use a Composite Desk pane")
+    print("    3. For full compositor integration: use a Composite Desk pane")
     print("=" * 62)
 
 

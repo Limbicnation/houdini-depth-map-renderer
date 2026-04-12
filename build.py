@@ -24,7 +24,7 @@ SRC_ROOT = Path(__file__).parent.resolve()
 
 HDA_METADATA = {
     "name":            "limbic_depth_map_renderer",
-    "table":           "Driver/cop2",
+    "table":           "Driver/cop",
     "label":           "Depth Map Renderer",
     "category":        "Limic",
     "version":         (2, 0, 0),
@@ -32,22 +32,23 @@ HDA_METADATA = {
     "python":          True,
     "python_module":   "python_panels.depth_map_panel",
     "description":     (
-        "Limbic Depth Map Renderer — one-click COP2 depth map pipeline. "
+        "Limbic Depth Map Renderer — one-click depth map pipeline. "
         "Mirrors the Blender Depth Map Generator workflow: Z-pass → Range → "
-        "Contrast → Grayscale → PNG/TIFF/EXR output."
+        "Contrast → Grayscale → PNG/TIFF/EXR output. "
+        "Supports COP2 (H18-H20) and new COP (H21+)."
     ),
     "creator":         "Limbicnation",
     "license":         "Apache 2.0",
     "external_data":   False,
 }
 
-# Nodes embedded in the HDA (described here for documentation; created at runtime)
-COP2_NODES = [
-    {"id": 1, "type": "cop2::deep",        "name": "DM_Source",    "label": "Z-Depth Source"},
-    {"id": 2, "type": "cop2::range",       "name": "DM_RangeMap",  "label": "Depth Range Mapper"},
-    {"id": 3, "type": "cop2::contrast",     "name": "DM_Contrast",  "label": "Depth Contrast"},
-    {"id": 4, "type": "cop2::convert",      "name": "DM_Grayscale", "label": "Grayscale Output"},
-    {"id": 5, "type": "cop2::file_output", "name": "DM_FileOut",   "label": "Depth File Output"},
+# Nodes created at runtime (semantic keys — actual types depend on Houdini version)
+COP_NODES = [
+    {"id": 1, "key": "source",      "name": "DM_Source",    "label": "Z-Depth Source"},
+    {"id": 2, "key": "range",       "name": "DM_RangeMap",  "label": "Depth Range Mapper"},
+    {"id": 3, "key": "contrast",    "name": "DM_Contrast",  "label": "Depth Contrast"},
+    {"id": 4, "key": "grayscale",   "name": "DM_Grayscale", "label": "Grayscale Output"},
+    {"id": 5, "key": "file_output", "name": "DM_FileOut",   "label": "Depth File Output"},
 ]
 
 
@@ -59,7 +60,7 @@ def _hda_archive(otlc_path: Path, src_root: Path):
     Real Houdini .otlc files contain compiled C++ HDAs.
     For a Python-only plugin this script creates a *scaffold* .otlc that:
       1. Registers the Python Panel interface
-      2. Sets up the cop2 HDA type
+      2. Sets up the COP HDA type
       3. Embeds the Python source for runtime network construction
 
     Users running this should import the resulting .otlc in Houdini via:
@@ -73,7 +74,7 @@ def _hda_archive(otlc_path: Path, src_root: Path):
         "build_date":    datetime.now(timezone.utc).isoformat(),
         "build_host":    os.environ.get("HOSTNAME", "unknown"),
         "metadata":      HDA_METADATA,
-        "cop2_nodes":    COP2_NODES,
+        "cop_nodes":     COP_NODES,
         "python_files": [],
     }
 
@@ -110,7 +111,7 @@ def _hda_archive(otlc_path: Path, src_root: Path):
         members.append(("AGENTS.md", agents_src.read_bytes()))
 
     # 8. Embed NodeDefinition XML so Houdini registers the operator correctly
-    node_def_xml = _generate_cop2_node_def().encode("utf-8")
+    node_def_xml = _generate_node_def().encode("utf-8")
     members.append(("NodeDefinition.xml", node_def_xml))
 
     # 9. Build tar
@@ -124,7 +125,7 @@ def _hda_archive(otlc_path: Path, src_root: Path):
     return otlc_path
 
 
-def _generate_cop2_node_def() -> str:
+def _generate_node_def() -> str:
     """Return a NodeDefinition XML string for the HDA.
 
     This is what Houdini parses when importing the .otlc to understand
@@ -132,10 +133,10 @@ def _generate_cop2_node_def() -> str:
     """
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
-<source type="cop2net">
+<source type="copnet">
 <name>limbic_depth_map_renderer</name>
 <label>Depth Map Renderer</label>
-<table>Driver/cop2</table>
+<table>Driver/cop</table>
 <parmlist>
   <parm name="dm_settings" stype="string" default="" len="1"
         label="Internal Settings" visible="0"/>
@@ -145,7 +146,7 @@ def _generate_cop2_node_def() -> str:
   <callback onview="python_panels.depth_map_panel.register_operators"/>
 </python_callbacks>
 <help>\
-Limbic Depth Map Renderer — one-click COP2 depth map pipeline.
+Limbic Depth Map Renderer — one-click depth map pipeline.
 See README.md for usage instructions.
 </help>
 </source>

@@ -2,14 +2,16 @@
 
 A **Blender Depth Map Generator v2.0** → **Houdini** port. Mirrors the Limbicnation Blender plugin's full feature set: depth pipeline with LINEAR / LOGARITHMIC / RAW normalization, independent mask export pipeline for ComfyUI, single-frame and animation rendering.
 
+**Dual COP backend**: works on Houdini 18–20 (legacy COP2) and Houdini 21+ (new COP system) — auto-detected at runtime.
+
 ---
 
 ## What It Does
 
 | Blender concept | Houdini equivalent |
 |---|---|
-| Depth compositor (Z → MapRange → Bright/Contrast → ColorRamp → FileOut) | COP2 network: DM_Source → DM_RangeMap/DM_LOG → DM_Brightness → DM_Contrast → DM_Scale → DM_Grayscale → DM_FileOut |
-| Mask pipeline (IndexOB / Cryptomatte → IDMask → FileOut) | COP2 network: DM_MSource (IDTopMask/Cryptomatte) → DM_MGrayscale/DM_MRGBA → DM_MaskFileOut |
+| Depth compositor (Z → MapRange → Bright/Contrast → ColorRamp → FileOut) | COP network: DM_Source → DM_RangeMap/DM_LOG → DM_Brightness → DM_Contrast → DM_Scale → DM_Grayscale → DM_FileOut |
+| Mask pipeline (IndexOB / Cryptomatte → IDMask → FileOut) | COP network: DM_MSource (IDToMask/Cryptomatte) → DM_MGrayscale/DM_MRGBA → DM_MaskFileOut |
 | Sidebar N-panel | Python Panel in the Composite Desk |
 | `scene.depth_map_settings` (PropertyGroup) | `dm_settings` parm (JSON on node) |
 | `setup_complete` / `mask_setup_complete` flags | `node.userData()` + settings dict |
@@ -21,14 +23,13 @@ A **Blender Depth Map Generator v2.0** → **Houdini** port. Mirrors the Limbicn
 ```
 houdini-depth-map-renderer/
 ├── python_panels/
-│   └── depth_map_panel.py      # Main plugin (v2.0 — depth + mask pipelines)
-├── HDAs/
-│   └── limbic_depth_map_renderer.otlc
-├── cop2_filters/
+│   └── depth_map_panel.py      # Main plugin (v2.1 — dual COP backend)
 ├── installer/
-│   └── install.py             # Houdini Textport install
+│   └── install.py              # Legacy Houdini Textport install
+├── install_fixed.py            # Modern installer (H21+ compatible)
 ├── config/
-│   └── shelf_actions.py       # Shelf tool registration
+│   └── shelf_actions.py        # Shelf tool registration
+├── icons/
 ├── build.py
 └── README.md
 ```
@@ -37,24 +38,32 @@ houdini-depth-map-renderer/
 
 ## Installation
 
-```python
-# Run in Houdini Textport:
->>> exec(open("/path/to/installer/install.py").read())
+### Recommended (H21+)
+
+```bash
+python3 install_fixed.py
 ```
 
-Or manually: copy `HDAs/*.otlc` → `~/houdini18.0/otls/`, `python_panels/*.py` → `~/houdini18.0/python_panels/`, restart Houdini.
+Then restart Houdini. Or from the Houdini Python Shell:
+
+```python
+exec(open("/path/to/install_fixed.py").read())
+```
+
+### Manual
+
+Copy `python_panels/depth_map_panel.py` → `~/houdini21.0/python_panels/`, restart Houdini.
 
 ---
 
 ## Usage
 
-1. Create a **COP2 network** (right-click → Material → Compose)
-2. Drop the **Depth Map Renderer HDA** onto the network
-3. Open the **Composite Desk** — the Depth Map panel appears in the sidebar
-4. Configure depth settings, then **Setup Depth Network**
-5. Optionally enable **Mask Export** and set Object Index + path
-6. **Setup Mask Network** (independent of depth pipeline)
-7. Render with **Render Depth Map** / **Render Mask**, or as animation
+1. Open the **Composite Desk** (or any pane)
+2. **[+] New Pane Tab → Python Panel → Depth Map**
+3. Configure depth settings, then **Setup Depth Network**
+4. Optionally enable **Mask Export** and set Object Index + path
+5. **Setup Mask Network** (independent of depth pipeline)
+6. Render with **Render Depth Map** / **Render Mask**, or as animation
 
 ---
 
@@ -72,7 +81,7 @@ Or manually: copy `HDAs/*.otlc` → `~/houdini18.0/otls/`, `python_panels/*.py` 
 | Contrast | Gain multiplier | 0.20 |
 | Format | PNG / TIFF / EXR | PNG |
 | Bit Depth | 8-bit / 16-bit | 16-bit |
-| Preview | Add COP2 Viewer node alongside FileOut | off |
+| Preview | Add Viewer node alongside FileOut | off |
 
 ### Mask Export (ComfyUI)
 
@@ -88,22 +97,35 @@ Or manually: copy `HDAs/*.otlc` → `~/houdini18.0/otls/`, `python_panels/*.py` 
 
 ---
 
-## COP2 Pipelines
+## COP Backend Compatibility
+
+The plugin auto-detects the Houdini version and uses the correct node types:
+
+| Semantic | COP2 (H18–H20) | New COP (H21+) |
+|---|---|---|
+| Depth source | `cop2::deep` | `file` |
+| Range mapping | `cop2::range` | `remap` |
+| Brightness | `cop2::brightness` | `bright` |
+| Contrast | `cop2::contrast` | `contrast` |
+| Scale | `cop2::multiply` | `function` |
+| Grayscale | `cop2::convert` | `mono` |
+| File output | `cop2::file_output` | `rop_image` |
+| ID mask | `cop2::idtopmask` | `idtomask` |
 
 ### Depth Network
 ```
-DM_Source (Z from Mantra deep raster)
+DM_Source (Z-depth input)
     → DM_RangeMap (LINEAR: near→far → 1→0)  OR  DM_LOG → DM_RangeMap (LOG)
     → DM_Brightness (brightness offset)
     → DM_Contrast (gain boost)
     → DM_Scale (scale_factor multiply)
-    → DM_Grayscale (RGBA → BW)
+    → DM_Grayscale (→ BW)
     → DM_FileOut (+ optional DM_Viewer)
 ```
 
 ### Mask Network (independent)
 ```
-DM_MSource (IDTopMask OBJECT_INDEX  OR  cop2::cryptomatte)
+DM_MSource (IDToMask / Cryptomatte)
     → DM_MGrayscale  OR  DM_MRGBA_Convert (GRAYSCALE / RGBA)
     → DM_MaskFileOut
 ```
@@ -113,10 +135,9 @@ DM_MSource (IDTopMask OBJECT_INDEX  OR  cop2::cryptomatte)
 ## Uninstall
 
 ```bash
-rm ~/houdini18.0/otls/limbic_depth_map_renderer.otlc
-rm ~/houdini18.0/python_panels/depth_map_panel.py
-rm ~/houdini18.0/packages/limbic_depth_map.json
-rm -rf ~/houdini18.0/cop2_filters/limbic_depth_map*
+rm ~/houdini21.0/python_panels/depth_map_panel.py
+rm ~/houdini21.0/python_panels/depth_map_panel.pypanel
+rm ~/houdini21.0/toolbar/limbic_depth_map_install.shelf
 ```
 Restart Houdini.
 
@@ -129,5 +150,5 @@ Apache 2.0
 ## Reference
 
 - Blender Depth Map Generator: `github.com/limbicnation/blender-depth-map-generator`
-- Houdini COP2 docs: `www.sidefx.com/docs/houdini/cop2/`
+- Houdini COP docs: `www.sidefx.com/docs/houdini/composite/`
 - Houdini Python Panel API: `www.sidefx.com/docs/houdini/hom/ui.html#panels`
