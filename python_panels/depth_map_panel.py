@@ -34,12 +34,19 @@ def _backend() -> str:
     global _COP_BACKEND
     if _COP_BACKEND is None:
         try:
-            cats = hou.nodeTypeCategories()
-            cop_net = cats.get("CopNet")
-            if cop_net is not None and "copnet" in cop_net.nodeTypes():
-                _COP_BACKEND = "cop"
+            # Primary: check if /img accepts copnet as a child type
+            img = hou.node("/img")
+            if img is not None:
+                child_types = img.childTypeCategory().nodeTypes()
+                if "copnet" in child_types:
+                    _COP_BACKEND = "cop"
+                elif "cop2net" in child_types:
+                    _COP_BACKEND = "cop2"
+                else:
+                    _COP_BACKEND = "cop" if hou.applicationVersion()[0] >= 21 else "cop2"
             else:
-                _COP_BACKEND = "cop2"
+                # /img doesn't exist yet — fall back to version check
+                _COP_BACKEND = "cop" if hou.applicationVersion()[0] >= 21 else "cop2"
         except Exception:
             _COP_BACKEND = "cop2"
     return _COP_BACKEND
@@ -578,14 +585,19 @@ class DepthMapPanel:
             img = hou.node("/img")
             if img is None:
                 img = hou.node("/obj").createNode("img", "img")
-            net = img.createNode(_container_type(), "depth_map1")
+            ctype = _container_type()
+            net = img.createNode(ctype, "depth_map1")
             net.moveToGoodPosition()
             self.node = net
             self._ensure_parm()
             return True
         except hou.OperationFailed as e:
+            be = _backend()
+            ctype = _container_type()
+            ver = hou.applicationVersionString()
             hou.ui.displayMessage(
-                f"Could not create Depth Map network:\n{e}",
+                f"Could not create Depth Map network:\n{e}\n\n"
+                f"Debug: backend={be}, container={ctype}, houdini={ver}",
                 severity=hou.severityType.Error)
             return False
 
