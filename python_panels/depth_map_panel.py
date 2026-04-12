@@ -48,7 +48,7 @@ def _backend() -> str:
 # Semantic key → {backend: houdini_type_string}
 _NODE_MAP = {
     "source":       {"cop2": "cop2::deep",        "cop": "file"},
-    "log":          {"cop2": "cop2::ln",           "cop": "function"},
+    "log":          {"cop2": "cop2::ln",           "cop": "function"},  # function COP, parm func_math=3 (ln)
     "range":        {"cop2": "cop2::range",        "cop": "remap"},
     "brightness":   {"cop2": "cop2::brightness",   "cop": "bright"},
     "contrast":     {"cop2": "cop2::contrast",     "cop": "contrast"},
