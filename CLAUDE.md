@@ -5,9 +5,9 @@ This file provides guidance to AI coding agents (Claude Code, Codex, etc.) when 
 ## Project at a Glance
 
 - **Type**: Houdini plugin (Python-only, no compiled C++)
-- **What it does**: One-click COP2 depth-map pipeline (mirrors Blender Depth Map Generator)
+- **What it does**: One-click depth-map pipeline (mirrors Blender Depth Map Generator)
 - **Entry point**: `python_panels/depth_map_panel.py`
-- **Min Houdini**: 18.0
+- **Min Houdini**: 18.0 (COP2 backend), 21.0 (new COP backend)
 
 ## Key Architecture Points
 
@@ -17,18 +17,27 @@ Everything (HDA definition, operators, Python Panel UI, settings) lives in one f
 
 ```
 python_panels/depth_map_panel.py
-├── DEFAULT_SETTINGS          # dict — change here to add new settings
-├── LimbicDepthMapPanelInterface  # Python Panel UI (Qt)
-├── LIMBIC_OT_setup_depth_map     # Creates COP2 network
-├── LIMBIC_OT_render_depth_map    # Executes render
-├── LIMBIC_OT_reset_depth_map     # Tears down network
-├── _build_cop2_network()         # Core pipeline builder
-└── _load_settings() / _save_settings()
+├── _backend() / _NODE_MAP       # COP backend detection (cop2 vs cop)
+├── _create_node()                # Backend-aware node creation
+├── DEFAULT_SETTINGS              # dict — change here to add new settings
+├── build_depth_network()         # Depth pipeline builder
+├── build_mask_network()          # Mask pipeline builder
+├── OpSetup / OpRender / OpReset  # Operators
+├── DepthMapPanel                 # Python Panel UI (Qt)
+└── _load() / _save()            # Settings persistence
 ```
+
+### Dual COP backend
+
+The plugin auto-detects the Houdini version at runtime:
+- **H18-H20**: `cop2net` container + `cop2::*` node types (legacy COP2)
+- **H21+**: `copnet` container + new COP node types (`bright`, `remap`, `mono`, etc.)
+
+Node type mapping lives in `_NODE_MAP` dict. Backend detection in `_backend()`.
 
 ### Node prefix: `DM_`
 
-Every COP2 node created by the plugin is prefixed with `DM_`. This is intentional — it:
+Every COP node created by the plugin is prefixed with `DM_`. This is intentional — it:
 - Makes the network easy to read
 - Enables safe teardown on reset
 - Mirrors Blender's `DM_` convention in its own compositor
@@ -40,17 +49,15 @@ The HDA stores settings as JSON in a hidden string parm called `dm_settings`. Th
 - No external config files needed
 - Mirrors Blender's `scene.depth_map_settings` property group
 
-### COP2 vs Blender Compositor
+### Houdini COP vs Blender Compositor
 
-The Houdini COP2 pipeline is conceptually identical to Blender's compositor:
-
-| Blender | Houdini COP2 |
-|---|---|
-| `CompositorNodeRLayers` | `cop2::deep` (reads Mantra Z) |
-| `CompositorNodeMapRange` | `cop2::range` |
-| `CompositorNodeBrightContrast` | `cop2::contrast` |
-| `CompositorNodeValToRGB` → BW | `cop2::convert` → `bw` |
-| `CompositorNodeFileOutput` | `cop2::file_output` |
+| Blender | COP2 (H18-H20) | New COP (H21+) |
+|---|---|---|
+| `CompositorNodeRLayers` | `cop2::deep` | `file` |
+| `CompositorNodeMapRange` | `cop2::range` | `remap` |
+| `CompositorNodeBrightContrast` | `cop2::brightness` / `cop2::contrast` | `bright` / `contrast` |
+| `CompositorNodeValToRGB` → BW | `cop2::convert` → `bw` | `mono` |
+| `CompositorNodeFileOutput` | `cop2::file_output` | `rop_image` |
 
 ## Code Style
 
@@ -60,24 +67,31 @@ The Houdini COP2 pipeline is conceptually identical to Blender's compositor:
 - **No external dependencies** — only `hou`, `os`, `json`
 - **PySide2** for Qt UI (Houdini 18.x), fallback PySide6 (Houdini 20+)
 
-## Modifying the COP2 Network
+## Modifying the Pipeline
 
-To change the pipeline (e.g. add a new node):
+To add a new node to the depth pipeline, use the abstraction layer:
 
 ```python
-# In _build_cop2_network() in depth_map_panel.py:
+# In build_depth_network() in depth_map_panel.py:
 
-# Create the new node
-new_node = parent.createNode("cop2::colormap", "DM_ColorMap")
+# Add to _NODE_MAP first:
+#   "colormap": {"cop2": "cop2::colormap", "cop": "colorcorrect"},
+
+# Then create using the abstraction:
+new_node = _create_node(parent, "colormap", "DM_ColorMap")
 new_node.setLabel("Custom Color Map")
 new_node.setPosition(hou.Vector2(750, 0))
 
-# Wire it in (insert between contrast and grayscale)
-new_node.setInput(0, rmap, 0)   # upstream
-gray.setInput(0, new_node, 0)   # downstream
+# Wire it in
+new_node.setInput(0, rmap, 0)
+gray.setInput(0, new_node, 0)
 
-# Set parms
-new_node.parm("colormap").set("viridis")
+# Set parms (use backend conditional if names differ)
+be = _backend()
+if be == "cop":
+    new_node.parm("new_cop_parm").set("viridis")
+else:
+    new_node.parm("colormap").set("viridis")
 ```
 
 ## Testing in Houdini
@@ -85,18 +99,18 @@ new_node.parm("colormap").set("viridis")
 There is no headless test suite — the plugin requires a GUI. To test:
 
 1. Open Houdini
-2. `File → Import → HDA File…` → select `HDAs/limbic_depth_map_renderer.otlc`
-3. Create a COP2 network: right-click → `Material → Compose`
-4. Drop the HDA onto the network
-5. Open Composite Desk → Depth Map panel
-6. Click each button in order: Setup → Render → Reset
+2. Run `install_fixed.py` in Houdini Textport
+3. Open Composite Desk → Depth Map panel
+4. Click each button in order: Setup → Render → Reset
+5. Test all normalization modes: LINEAR, LOGARITHMIC, RAW
 
 ## Files Quick-Reference
 
 | File | Purpose |
 |---|---|
 | `python_panels/depth_map_panel.py` | **Main module** — everything here |
-| `installer/install.py` | One-click install (run in Houdini Textport) |
+| `install_fixed.py` | Modern installer (H21+ compatible) |
+| `installer/install.py` | Legacy installer |
 | `build.py` | Generates the `.otlc` HDA archive |
 | `config/shelf_actions.py` | Houdini shelf tool registration |
 | `AGENTS.md` | General agent guidance |
@@ -114,18 +128,21 @@ There is no headless test suite — the plugin requires a GUI. To test:
 ## Adding a New Setting
 
 1. `DEFAULT_SETTINGS` dict: add the key/value
-2. `_load_settings()` / `_save_settings()`: already generic (JSON serialisation), no change needed
-3. Qt panel `buildNormal UI_()`: add a widget and wire it in `_collect_settings_from_ui()`
-4. `_build_cop2_network()`: read from `settings` dict and apply to node parms
+2. `_load()` / `_save()`: already generic (JSON serialisation), no change needed
+3. Qt panel `_build_ui()`: add a widget and wire it in `_collect()`
+4. `build_depth_network()`: read from `settings` dict and apply to node parms
 5. `README.md`: update the settings table
 
 ## FAQ
 
 **Q: Why is the HDA `.otlc` just a tar archive?**
-A: Real compiled HDAs contain compiled C++ libraries. Since this is Python-only, the `.otlc` is a lightweight tar containing the Python source + a manifest. Houdini can import it as a package reference.
+A: Real compiled HDAs contain compiled C++ libraries. Since this is Python-only, the `.otlc` is a lightweight tar containing the Python source + a manifest.
 
 **Q: Can I use a pre-rendered EXR as depth input?**
-A: Yes — replace `DM_Source` (`cop2::deep`) with `cop2::file` pointing to the EXR. The code is structured so you only need to change the node creation line in `_build_cop2_network()`.
+A: On H21+ the source node is already a `file` node — set `filename` to the EXR path. On H18-H20, change the `"source"` entry in `_NODE_MAP` or replace `DM_Source` with `cop2::file`.
 
 **Q: The Python Panel doesn't appear.**
-A: Make sure the HDA has `python: true` in its definition and the class name matches what Houdini expects. Check `hou.ui.curPaneTab()` — you must be in a Composite Desk for COP2 panels to show.
+A: Make sure the panel is installed via `install_fixed.py`. Check `hou.ui.curPaneTab()` — you must be in a Composite Desk for compositor panels to show.
+
+**Q: How does the dual backend work?**
+A: `_backend()` tries to create a `copnet` node. If it succeeds → H21+ (new COP). If it fails → H18-H20 (legacy COP2). The result is cached for the session. `_NODE_MAP` maps semantic keys to the correct node type strings per backend.

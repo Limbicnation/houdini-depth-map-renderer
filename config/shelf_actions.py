@@ -24,23 +24,28 @@ except ImportError as e:
     raise
 
 
-def _active_cop2_node():
+def _active_cop_node():
     pane = hou.ui.curPaneTab()
     if pane is None:
         return None
-    if pane.type() == hou.paneTabType.COP2:
+    if pane.type() == hou.paneTabType.CompositorViewer:
         return pane.currentNode()
+    cop_cats = set()
+    for cat_name in ("Cop2", "Cop"):
+        cat = hou.nodeTypeCategories().get(cat_name)
+        if cat is not None:
+            cop_cats.add(cat)
     for n in hou.selectedNodes():
-        if n.type().category() == hou.nodeType.Category.COP2:
+        if n.type().category() in cop_cats:
             return n
     return None
 
 
 def limbic_setup():
-    node = _active_cop2_node()
+    node = _active_cop_node()
     if node is None:
         hou.ui.displayMessage(
-            "Select a COP2 node first.", title="Depth Map")
+            "Select a COP node first.", title="Depth Map")
         return
     try:
         ok = OpSetup.execute(node)
@@ -54,9 +59,9 @@ def limbic_setup():
 
 
 def limbic_render():
-    node = _active_cop2_node()
+    node = _active_cop_node()
     if node is None:
-        hou.ui.displayMessage("Select a COP2 network node first.")
+        hou.ui.displayMessage("Select a COP network node first.")
         return
     try:
         OpRender.execute(node, animation=False)
@@ -66,9 +71,9 @@ def limbic_render():
 
 
 def limbic_render_animation():
-    node = _active_cop2_node()
+    node = _active_cop_node()
     if node is None:
-        hou.ui.displayMessage("Select a COP2 network node first.")
+        hou.ui.displayMessage("Select a COP network node first.")
         return
     try:
         OpRender.execute(node, animation=True)
@@ -78,9 +83,9 @@ def limbic_render_animation():
 
 
 def limbic_reset():
-    node = _active_cop2_node()
+    node = _active_cop_node()
     if node is None:
-        hou.ui.displayMessage("Select a COP2 network node first.")
+        hou.ui.displayMessage("Select a COP network node first.")
         return
     try:
         OpReset.execute(node)
@@ -117,7 +122,7 @@ if shelf is not None:
 
     _add_tool("limbic_dm_setup",  "⚙ Setup",
               f"{ICON}/depth_setup.svg", limbic_setup,
-              "Build the COP2 depth map network")
+              "Build the depth map network")
     _add_tool("limbic_dm_render", "▶ Render",
               f"{ICON}/depth_render.svg", limbic_render,
               "Render single-frame depth map")
