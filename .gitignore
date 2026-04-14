@@ -15,6 +15,9 @@ autosave/
 Backup/
 backup/
 
+# Screenshots / captured assets
+images/
+
 # Depth map output
 depth_maps/
 depth_*.png
