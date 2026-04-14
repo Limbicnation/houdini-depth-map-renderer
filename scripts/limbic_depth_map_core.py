@@ -16,7 +16,10 @@ import json
 import math
 import sys
 
-import hou
+# NOTE: `import hou` is done LAZILY inside each function that needs it.
+# This allows build.py (which runs in system Python3, outside Houdini) to
+# import pure-data constants like PARM_DEFS, _NODE_MAP, DEFAULT_SETTINGS
+# without triggering ModuleNotFoundError for the `hou` module.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -35,6 +38,7 @@ _COP_BACKEND = None
 
 
 def backend() -> str:
+    import hou
     global _COP_BACKEND
     if _COP_BACKEND is None:
         try:
@@ -91,6 +95,7 @@ def _create_node(parent, key, name):
 
 
 def _set_label(node, label):
+    import hou
     try:
         node.setLabel(label)
     except Exception:
@@ -168,7 +173,7 @@ _PARM_MAP = {
     "maskenabled":    "mask_enabled",
     "masksource":     "mask_source",
     "maskindex":      "mask_index",
-    "maskformat":     "mask_format",
+    "maskformat":    "mask_format",
     "maskoutputpath": "mask_output_path",
 }
 
@@ -267,6 +272,7 @@ def save_settings(node, settings: dict):
 
 
 def add_dm_settings_parm(node) -> bool:
+    import hou
     if node.parm("dm_settings") is not None:
         return True
     try:
@@ -292,6 +298,7 @@ def dm_children(node):
 
 def output_dir(settings: dict, key: str = "output_path",
                fallback: str = "depth_maps") -> str:
+    import hou
     path = settings.get(key, "").strip()
     if not path:
         path = hou.expandString(f"$HIP/{fallback}/")
@@ -311,6 +318,7 @@ def filename(settings: dict, prefix: str, frame=None) -> str:
 
 
 def frame_range(settings: dict):
+    import hou
     if settings.get("use_scene_range", True):
         r = hou.playbar.playbackRange()
         return range(int(r[0]), int(r[1]) + 1)
@@ -318,6 +326,7 @@ def frame_range(settings: dict):
 
 
 def notify(node, severity, msg: str):
+    import hou
     try:
         hou.ui.setStatusMessage(msg, severity=severity)
     except Exception:
@@ -329,6 +338,7 @@ def notify(node, severity, msg: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def resolve_script_path(relative_path: str) -> str:
+    import hou
     hip_path = hou.expandString(f"$HIP/{relative_path}")
     if os.path.exists(hip_path):
         return hip_path
@@ -352,24 +362,45 @@ def resolve_script_path(relative_path: str) -> str:
 
 
 def _find_core_dir() -> str:
-    this_file = os.path.abspath(__file__)
-    this_dir = os.path.dirname(this_file)
-    core_file = os.path.join(this_dir, "limbic_depth_map_core.py")
-    if os.path.exists(core_file):
-        return this_dir
+    """Locate the scripts/ directory containing this module.
 
+    Works in all execution contexts:
+      - Normal file import (__file__ is defined)
+      - Houdini .pypanel CDATA (__file__ is NOT defined)
+      - HDA PythonModule embedded script
+    """
+    # 1. Try __file__-based resolution (works for normal imports)
+    try:
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        core_file = os.path.join(this_dir, "limbic_depth_map_core.py")
+        if os.path.exists(core_file):
+            return this_dir
+    except NameError:
+        pass
+
+    # 2. Try LIMBIC_DEPTH_MAP environment variable
     limbic_root = os.environ.get("LIMBIC_DEPTH_MAP", "")
     if limbic_root:
         scripts_dir = os.path.join(limbic_root, "scripts")
         if os.path.exists(os.path.join(scripts_dir, "limbic_depth_map_core.py")):
             return scripts_dir
 
-    for hp in hou.expandString("$HOUDINI_PATH").split(os.pathsep):
-        candidate = os.path.join(hp, "scripts")
-        if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
-            return candidate
+    # 3. Try HOUDINI_PATH scan (requires hou, but we're in Houdini)
+    try:
+        import hou
+        for hp in hou.expandString("$HOUDINI_PATH").split(os.pathsep):
+            candidate = os.path.join(hp, "scripts")
+            if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+                return candidate
+    except Exception:
+        pass
 
-    return this_dir
+    # 4. Last resort: relative to CWD
+    candidate = os.path.join(os.getcwd(), "scripts")
+    if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+        return candidate
+
+    return os.path.normpath(os.path.join(os.getcwd(), "scripts"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,6 +459,7 @@ def _set_file_output_parms(fout, upstream, odir, fname, settings, be):
 
 
 def build_depth_network(node, settings: dict):
+    import hou
     be = backend()
     _destroy_depth_nodes(node)
 
@@ -525,6 +557,7 @@ def build_depth_network(node, settings: dict):
 
 
 def build_mask_network(node, settings: dict):
+    import hou
     be = backend()
     _destroy_mask_nodes(node)
 
@@ -608,6 +641,7 @@ def build_mask_network(node, settings: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def setup_depth(node, mask_only=False) -> bool:
+    import hou
     settings = load_settings(node)
     try:
         if mask_only:
@@ -627,6 +661,7 @@ def setup_depth(node, mask_only=False) -> bool:
 
 
 def render_depth(node, animation=False, mask=False) -> bool:
+    import hou
     try:
         settings = load_settings(node)
         settings["animation"] = animation
@@ -676,6 +711,7 @@ def render_depth(node, animation=False, mask=False) -> bool:
 
 
 def reset_depth(node, mask_only=False) -> bool:
+    import hou
     try:
         children = list(dm_children(node))
         for n in children:

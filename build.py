@@ -142,7 +142,7 @@ def _generate_node_def() -> str:
                 parm_lines.append(
                     f'  <parm name="{parm_name}" stype="string" '
                     f'default="{default}" len="1" label="{label}" '
-                    f'menu="{{menu_str}}"/>'
+                    f'menu="{menu_str}"/>'
                 )
             else:
                 parm_lines.append(

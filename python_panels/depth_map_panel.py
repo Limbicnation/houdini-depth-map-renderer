@@ -10,8 +10,50 @@ Both pipelines are independent — mask does NOT require depth.
 import os
 import sys
 
-_core_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "..", "scripts")
+
+def _find_core_dir() -> str:
+    """Locate the scripts/ directory containing limbic_depth_map_core.py.
+
+    Works in all execution contexts:
+      - Normal file import (__file__ is defined)
+      - Houdini .pypanel CDATA (__file__ is NOT defined)
+      - HDA PythonModule embedded script
+    """
+    # 1. Try __file__-based resolution (works for normal imports)
+    try:
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(this_dir, "..", "scripts")
+        if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+            return os.path.normpath(candidate)
+    except NameError:
+        pass
+
+    # 2. Try LIMBIC_DEPTH_MAP environment variable
+    limbic_root = os.environ.get("LIMBIC_DEPTH_MAP", "")
+    if limbic_root:
+        scripts_dir = os.path.join(limbic_root, "scripts")
+        if os.path.exists(os.path.join(scripts_dir, "limbic_depth_map_core.py")):
+            return scripts_dir
+
+    # 3. Try HOUDINI_PATH scan (requires hou, but we're in Houdini)
+    try:
+        import hou
+        for hp in hou.expandString("$HOUDINI_PATH").split(os.pathsep):
+            candidate = os.path.join(hp, "scripts")
+            if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+                return candidate
+    except Exception:
+        pass
+
+    # 4. Last resort: relative to CWD
+    candidate = os.path.join(os.getcwd(), "scripts")
+    if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+        return candidate
+
+    return os.path.normpath(os.path.join(os.getcwd(), "scripts"))
+
+
+_core_dir = _find_core_dir()
 if _core_dir not in sys.path:
     sys.path.insert(0, _core_dir)
 
@@ -22,7 +64,6 @@ from limbic_depth_map_core import (  # noqa: E402
     HDA_CATEGORY,
     DEFAULT_SETTINGS,
     backend,
-    _backend,
     _container_type,
     load_settings,
     save_settings,
@@ -38,6 +79,27 @@ from limbic_depth_map_core import (  # noqa: E402
     render_depth,
     reset_depth,
 )
+
+# ── Houdini 21.0 UI Bug Workaround ─────────────────────────────────────────
+# H21+ new COP node types don't expose outputNames() the same way COP2 did.
+# This causes IndexError in nodegraphutils.py line 1281 when hovering wires:
+#   output_names[wire.outputIndex()] -> IndexError (empty tuple)
+# We monkey-patch getPromptWithNoHandler to catch and suppress this.
+# SideFX bug, cosmetic only — does not affect node functionality.
+def _patch_h21_wire_hover_bug():
+    try:
+        from nodegraphutils import getPromptWithNoHandler as _orig
+        import nodegraphutils as _ngu
+        def _safe_get_prompt(uievent):
+            try:
+                return _orig(uievent)
+            except IndexError:
+                return ""
+        _ngu.getPromptWithNoHandler = _safe_get_prompt
+    except Exception:
+        pass
+
+_patch_h21_wire_hover_bug()
 
 _SETTINGS_STORE: dict[str, dict] = {}
 
@@ -170,7 +232,7 @@ class DepthMapPanel:
             self._ensure_parm()
             return True
         except Exception as e:
-            be = _backend()
+            be = backend()
             ctype = _container_type()
             ver = hou.applicationVersionString()
             hou.ui.displayMessage(

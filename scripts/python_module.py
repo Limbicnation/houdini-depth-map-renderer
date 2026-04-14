@@ -13,7 +13,21 @@ Dual COP backend: cop2 (H18-H20) / cop (H21+).
 import sys
 import os
 
-_core_dir = os.path.dirname(os.path.abspath(__file__))
+# Locate core module — use _find_core_dir from the same directory or
+# fall back to __file__-based resolution.
+try:
+    _core_dir = os.path.dirname(os.path.abspath(__file__))
+    _core_file = os.path.join(_core_dir, "limbic_depth_map_core.py")
+    if not os.path.exists(_core_file):
+        raise NameError
+except NameError:
+    # __file__ not defined (e.g., embedded in HDA)
+    _env = os.environ.get("LIMBIC_DEPTH_MAP", "")
+    if _env and os.path.exists(os.path.join(_env, "scripts", "limbic_depth_map_core.py")):
+        _core_dir = os.path.join(_env, "scripts")
+    else:
+        _core_dir = os.path.join(os.getcwd(), "scripts")
+
 if _core_dir not in sys.path:
     sys.path.insert(0, _core_dir)
 
