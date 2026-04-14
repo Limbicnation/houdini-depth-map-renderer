@@ -177,8 +177,8 @@ def main():
     ap.add_argument(
         "--out",
         type=Path,
-        default=SRC_ROOT / "HDAs" / "limbic_depth_map_renderer.otlc",
-        help="Output .otlc path (default: ./HDAs/limbic_depth_map_renderer.otlc)",
+        default=SRC_ROOT / "HDAs" / "limbic_depth_map_renderer.hda",
+        help="Output .hda path (default: ./HDAs/limbic_depth_map_renderer.hda)",
     )
     ap.add_argument(
         "--install",
