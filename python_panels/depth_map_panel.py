@@ -93,6 +93,12 @@ _backend = backend
 # SideFX bug, cosmetic only — does not affect node functionality.
 def _patch_h21_wire_hover_bug():
     try:
+        import hou
+        if hou.applicationVersion()[0] < 21:
+            return
+    except Exception:
+        pass
+    try:
         from nodegraphutils import getPromptWithNoHandler as _orig
         import nodegraphutils as _ngu
         def _safe_get_prompt(uievent):
@@ -106,11 +112,14 @@ def _patch_h21_wire_hover_bug():
 
 _patch_h21_wire_hover_bug()
 
-_SETTINGS_STORE: dict[str, dict] = {}
+_SETTINGS_STORE: dict[int, dict] = {}
 
 
-def _settings_key(node: hou.Node) -> str:
-    return node.path()
+def _settings_key(node: hou.Node) -> int:
+    try:
+        return node.sessionId()
+    except Exception:
+        return hash(node.path())
 
 
 def _load(node: hou.Node) -> dict:
@@ -192,8 +201,11 @@ def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
                 pass
             return None
 
-    # Collision-safe naming: depth_map1, depth_map2, ...
-    base = node_name.rstrip("0123456789") or "depth_map"
+    base = node_name
+    if base[-1:].isdigit():
+        while base and base[-1].isdigit():
+            base = base[:-1]
+        base = base or "depth_map"
     counter = 1
     while img.node(f"{base}{counter}") is not None:
         counter += 1
@@ -201,15 +213,23 @@ def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
 
     try:
         with hou.undos.group("Spawn Depth Map HDA"):
-            node = img.createNode(_container_type(), final_name)
+            hda_type = hou.nodeType("Driver/cop/limbic_depth_map_renderer")
+            if hda_type is not None:
+                node = img.createNode(
+                    "limbic_depth_map_renderer", final_name)
+            else:
+                node = img.createNode(_container_type(), final_name)
+                add_dm_settings_parm(node)
+                p = node.parm("dm_settings")
+                if p is not None:
+                    p.set(json.dumps({
+                        "setup_complete": False,
+                        "mask_setup_complete": False,
+                    }))
             node.moveToGoodPosition()
-            add_dm_settings_parm(node)
-            p = node.parm("dm_settings")
-            if p is not None:
-                p.set(json.dumps({"setup_complete": False, "mask_setup_complete": False}))
             node.setSelected(True, clear_all_selected=True)
         hou.ui.setStatusMessage(
-            f"Depth Map: spawned \'{final_name}\' in /img",
+            f"Depth Map: spawned '{final_name}' in /img",
             severity=hou.severityType.ImportantMessage,
         )
         return node

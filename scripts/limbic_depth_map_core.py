@@ -34,19 +34,20 @@ LAYOUT_MASK_Y = -300
 # COP Backend Detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+_ENABLE_COP_BACKEND = False
+
 _COP_BACKEND = None
 
 
 def backend() -> str:
-    import hou
     global _COP_BACKEND
     if _COP_BACKEND is None:
-        # Force cop2 for now.  H21's new COP backend has a fundamental
-        # data-flow issue: the `file` node output cannot be consumed by
-        # `remap` or other downstream nodes (they report "source is
-        # missing").  H21 still ships cop2net and cop2::* node types,
-        # so we use those until SideFX fixes the cop pipeline.
-        _COP_BACKEND = "cop2"
+        if _ENABLE_COP_BACKEND:
+            import hou
+            ver = hou.applicationVersion()
+            _COP_BACKEND = "cop" if ver[0] >= 21 else "cop2"
+        else:
+            _COP_BACKEND = "cop2"
     return _COP_BACKEND
 
 
@@ -84,14 +85,10 @@ def _create_node(parent, key, name):
 
 def _set_label(node, label):
     import hou
-    try:
-        node.setLabel(label)
-    except Exception:
-        try:
-            node.setComment(label)
-            node.setGenericFlag(hou.nodeFlag.DisplayComment, True)
-        except Exception:
-            pass
+    if not _try_ok(node.setLabel, label, where="set_label"):
+        _try_ok(node.setComment, label, where="set_label_comment")
+        _try_ok(node.setGenericFlag, hou.nodeFlag.DisplayComment, True,
+                where="set_label_flag")
 
 
 def _container_type():
@@ -100,10 +97,29 @@ def _container_type():
 
 def _safe_set_display(node, display_node):
     if hasattr(node, "setDisplayNode"):
-        try:
-            node.setDisplayNode(display_node)
-        except Exception:
-            pass
+        _try(node.setDisplayNode, display_node, where="set_display")
+
+
+_SENTINEL = object()
+
+
+def _try(fn, *args, where: str = "", default=None, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        print(f"[limbic_depth_map] {where}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return default
+
+
+def _try_ok(fn, *args, where: str = "", **kwargs) -> bool:
+    try:
+        fn(*args, **kwargs)
+        return True
+    except Exception as e:
+        print(f"[limbic_depth_map] {where}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return False
 
 
 def _wire(node, upstream, be, input_name='source', input_idx=0,
@@ -116,15 +132,11 @@ def _wire(node, upstream, be, input_name='source', input_idx=0,
     path works across both backends.
     """
     if be == "cop":
-        try:
-            node.setNamedInput(input_name, upstream, output_idx)
+        if _try_ok(node.setNamedInput, input_name, upstream, output_idx,
+                   where=f"wire_named:{node.name()}"):
             return
-        except (TypeError, AttributeError):
-            pass
-    try:
-        node.setInput(input_idx, upstream, output_idx)
-    except Exception:
-        pass
+    _try_ok(node.setInput, input_idx, upstream, output_idx,
+            where=f"wire:{node.name()}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,33 +240,31 @@ def load_settings(node) -> dict:
         for parm_name, key in _PARM_MAP.items():
             p = node.parm(parm_name)
             if p is not None:
-                try:
-                    val = p.eval()
+                val = _try(p.eval, where=f"load_parm:{parm_name}",
+                           default=_SENTINEL)
+                if val is not _SENTINEL:
                     settings[key] = val
-                except Exception:
-                    pass
         json_p = node.parm("dm_settings")
         if json_p is not None:
-            try:
-                raw = json_p.eval()
-                if raw:
-                    saved = json.loads(raw)
-                    settings["setup_complete"] = saved.get("setup_complete", False)
+            raw = _try(json_p.eval, where="load_json_parm")
+            if raw:
+                saved = _try(json.loads, raw, where="parse_json_settings",
+                             default={})
+                if saved:
+                    settings["setup_complete"] = saved.get(
+                        "setup_complete", False)
                     settings["mask_setup_complete"] = saved.get(
-                        "mask_setup_complete", False
-                    )
-            except Exception:
-                pass
+                        "mask_setup_complete", False)
         return settings
 
-    try:
-        p = node.parm("dm_settings")
-        if p is not None:
-            raw = p.eval()
-            if raw:
-                return {**DEFAULT_SETTINGS, **json.loads(raw)}
-    except Exception:
-        pass
+    p = node.parm("dm_settings")
+    if p is not None:
+        raw = _try(p.eval, where="load_json_parm")
+        if raw:
+            saved = _try(json.loads, raw, where="parse_json_settings",
+                         default={})
+            if saved:
+                return {**DEFAULT_SETTINGS, **saved}
     return {**DEFAULT_SETTINGS}
 
 
@@ -265,19 +275,13 @@ def save_settings(node, settings: dict):
     }
     p = node.parm("dm_settings")
     if p is not None:
-        try:
-            p.set(json.dumps(tracking))
-        except Exception:
-            pass
+        _try(p.set, json.dumps(tracking), where="save_json_parm")
 
     if has_explicit_parms(node):
         for parm_name, key in _PARM_MAP.items():
             p = node.parm(parm_name)
             if p is not None and key in settings:
-                try:
-                    p.set(settings[key])
-                except Exception:
-                    pass
+                _try(p.set, settings[key], where=f"save_parm:{parm_name}")
 
 
 def add_dm_settings_parm(node) -> bool:
@@ -322,8 +326,7 @@ def output_dir(settings: dict, key: str = "output_path",
         path = hou.expandString(f"$HIP/{fallback}/")
     path = hou.expandString(path)
     # If path looks like a file (has extension), use its parent dir
-    import posixpath
-    _, ext = posixpath.splitext(path)
+    _, ext = os.path.splitext(path)
     if ext:
         path = os.path.dirname(path)
     os.makedirs(path, exist_ok=True)
@@ -384,47 +387,6 @@ def resolve_script_path(relative_path: str) -> str:
     return hip_path
 
 
-def _find_core_dir() -> str:
-    """Locate the scripts/ directory containing this module.
-
-    Works in all execution contexts:
-      - Normal file import (__file__ is defined)
-      - Houdini .pypanel CDATA (__file__ is NOT defined)
-      - HDA PythonModule embedded script
-    """
-    # 1. Try __file__-based resolution (works for normal imports)
-    try:
-        this_dir = os.path.dirname(os.path.abspath(__file__))
-        core_file = os.path.join(this_dir, "limbic_depth_map_core.py")
-        if os.path.exists(core_file):
-            return this_dir
-    except NameError:
-        pass
-
-    # 2. Try LIMBIC_DEPTH_MAP environment variable
-    limbic_root = os.environ.get("LIMBIC_DEPTH_MAP", "")
-    if limbic_root:
-        scripts_dir = os.path.join(limbic_root, "scripts")
-        if os.path.exists(os.path.join(scripts_dir, "limbic_depth_map_core.py")):
-            return scripts_dir
-
-    # 3. Try HOUDINI_PATH scan (requires hou, but we're in Houdini)
-    try:
-        import hou
-        for hp in hou.expandString("$HOUDINI_PATH").split(os.pathsep):
-            candidate = os.path.join(hp, "scripts")
-            if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
-                return candidate
-    except Exception:
-        pass
-
-    # 4. Last resort: relative to CWD
-    candidate = os.path.join(os.getcwd(), "scripts")
-    if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
-        return candidate
-
-    return os.path.normpath(os.path.join(os.getcwd(), "scripts"))
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COP Network Builders
@@ -434,20 +396,14 @@ def _destroy_depth_nodes(node):
     for n in list(dm_children(node)):
         if n.name().startswith(NODE_PREFIX + "M"):
             continue
-        try:
-            n.destroy()
-        except Exception:
-            pass
+        _try(n.destroy, where=f"destroy_depth:{n.name()}")
 
 
 def _destroy_mask_nodes(node):
     for n in list(dm_children(node)):
         if not n.name().startswith(NODE_PREFIX + "M"):
             continue
-        try:
-            n.destroy()
-        except Exception:
-            pass
+        _try(n.destroy, where=f"destroy_mask:{n.name()}")
 
 
 def _set_range_parms(rmap, near, far, inv, be):
@@ -604,10 +560,8 @@ def build_mask_network(node, settings: dict):
         mask_input = _create_node(node, "sopimport", NODE_PREFIX + "MaskInput")
         _set_label(mask_input, "SOP Source (set path to your geo)")
         mask_input.setPosition(hou.Vector2(-200, Y))
-        try:
-            mask_input.parm("soppath").set("")
-        except Exception:
-            pass
+        _try(mask_input.parm("soppath").set, "",
+             where="set_soppath")
 
         mask_src = _create_node(node, "rasterize", NODE_PREFIX + "MSource")
         _set_label(mask_src, "Rasterize Geo to Mask")
@@ -618,10 +572,8 @@ def build_mask_network(node, settings: dict):
         mask_src = _create_node(node, "idtomask", NODE_PREFIX + "MSource")
         _set_label(mask_src, "Object Index Mask")
         mask_src.setPosition(hou.Vector2(0, Y))
-        try:
-            mask_src.parm("object_id").set(midx)
-        except Exception:
-            pass
+        _try(mask_src.parm("object_id").set, midx,
+             where="set_object_id")
 
     x = 300
     if mfmt == "RGBA":
@@ -739,10 +691,7 @@ def reset_depth(node, mask_only=False) -> bool:
         for n in children:
             if mask_only and not n.name().startswith(NODE_PREFIX + "M"):
                 continue
-            try:
-                n.destroy()
-            except Exception:
-                pass
+            _try(n.destroy, where=f"reset:{n.name()}")
 
         settings = load_settings(node)
         if mask_only:
