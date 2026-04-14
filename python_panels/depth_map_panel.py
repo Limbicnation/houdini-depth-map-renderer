@@ -7,6 +7,7 @@ limbic_depth_map_core.py.
 Both pipelines are independent — mask does NOT require depth.
 """
 
+import json
 import os
 import sys
 
@@ -78,7 +79,11 @@ from limbic_depth_map_core import (  # noqa: E402
     setup_depth,
     render_depth,
     reset_depth,
+    reset_backend_cache,
 )
+
+# Backwards-compatible alias (HDA PythonModule compatibility)
+_backend = backend
 
 # ── Houdini 21.0 UI Bug Workaround ─────────────────────────────────────────
 # H21+ new COP node types don't expose outputNames() the same way COP2 did.
@@ -109,15 +114,9 @@ def _settings_key(node: hou.Node) -> str:
 
 
 def _load(node: hou.Node) -> dict:
+    """Load settings — delegates to core load_settings(), falls back to store."""
     try:
-        p = node.parm("dm_settings")
-        if p is None:
-            add_dm_settings_parm(node)
-            p = node.parm("dm_settings")
-        if p is not None:
-            raw = p.eval()
-            if raw:
-                return {**DEFAULT_SETTINGS, **__import__("json").loads(raw)}
+        return load_settings(node)
     except Exception:
         pass
     key = _settings_key(node)
@@ -127,14 +126,13 @@ def _load(node: hou.Node) -> dict:
 
 
 def _save(node: hou.Node, settings: dict):
-    p = node.parm("dm_settings")
-    if p is None:
-        add_dm_settings_parm(node)
-        p = node.parm("dm_settings")
-    if p is not None:
-        p.set(__import__("json").dumps(settings))
-    else:
-        _SETTINGS_STORE[_settings_key(node)] = settings
+    """Save settings — delegates to core save_settings(), falls back to store."""
+    try:
+        save_settings(node, settings)
+        return
+    except Exception:
+        pass
+    _SETTINGS_STORE[_settings_key(node)] = settings
 
 
 class OpSetup:
@@ -162,6 +160,72 @@ class OpReset:
         return reset_depth(node, mask_only=mask_only)
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HDA Spawner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
+    """Create a limbic_depth_map_renderer COP network instance in /img.
+
+    - No hardcoded paths — uses hou.getenv() / hou.expandString().
+    - Auto-creates /img container if missing.
+    - Auto-increments name on collision (depth_map1, depth_map2, ...).
+    - Wrapped in undo group.
+    - Returns the created hou.Node, or None on failure.
+    """
+    img = hou.node("/img")
+    if img is None:
+        try:
+            img = hou.node("/obj").createNode("img", "img")
+            img.moveToGoodPosition()
+        except Exception as e:
+            print(f"[Limbic Depth Map] Could not create /img context: {e}",
+                  file=sys.stderr)
+            try:
+                hou.ui.displayMessage(
+                    f"Could not create /img context:\n{e}",
+                    title="Depth Map Spawner",
+                    severity=hou.severityType.Error,
+                )
+            except Exception:
+                pass
+            return None
+
+    # Collision-safe naming: depth_map1, depth_map2, ...
+    base = node_name.rstrip("0123456789") or "depth_map"
+    counter = 1
+    while img.node(f"{base}{counter}") is not None:
+        counter += 1
+    final_name = f"{base}{counter}"
+
+    try:
+        with hou.undos.group("Spawn Depth Map HDA"):
+            node = img.createNode(_container_type(), final_name)
+            node.moveToGoodPosition()
+            add_dm_settings_parm(node)
+            p = node.parm("dm_settings")
+            if p is not None:
+                p.set(json.dumps({"setup_complete": False, "mask_setup_complete": False}))
+            node.setSelected(True, clear_all_selected=True)
+        hou.ui.setStatusMessage(
+            f"Depth Map: spawned \'{final_name}\' in /img",
+            severity=hou.severityType.ImportantMessage,
+        )
+        return node
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        try:
+            hou.ui.displayMessage(
+                f"Spawn failed:\n{e}",
+                title="Depth Map Spawner",
+                severity=hou.severityType.Error,
+            )
+        except Exception:
+            pass
+        return None
+
 class DepthMapPanel:
 
     def __init__(self):
@@ -172,6 +236,14 @@ class DepthMapPanel:
                 self._ensure_parm()
         except Exception:
             self.node = None
+
+    def __del__(self):
+        """Clean up _SETTINGS_STORE entries when panel is destroyed."""
+        try:
+            if self.node is not None:
+                _SETTINGS_STORE.pop(_settings_key(self.node), None)
+        except Exception:
+            pass
 
     def _resolve_node(self):
         try:
@@ -191,27 +263,28 @@ class DepthMapPanel:
     def onRevive(self):
         self.node = self._resolve_node()
         self._ensure_parm()
+        reset_backend_cache()
 
     def onActiveNodeChanged(self, kwargs):
         self.node = kwargs.get("active_node", None)
         self._ensure_parm()
 
     def _find_hda(self):
-        container_types = {"copnet", "cop2net"}
-        for root in [hou.node("/obj"), hou.node("/img")]:
-            if root is None:
-                continue
-            for n in root.allSubChildren():
-                try:
-                    tname = n.type().name()
-                    if tname == "limbic_depth_map_renderer":
-                        return n
-                    if tname in container_types and (
-                            n.parm("dm_settings") is not None
-                            or _settings_key(n) in _SETTINGS_STORE):
-                        return n
-                except Exception:
-                    pass
+        # Scoped to /img only — avoids O(n) allSubChildren() on heavy scenes
+        img = hou.node("/img")
+        if img is None:
+            return None
+        for n in img.children():
+            try:
+                tname = n.type().name()
+                if tname == "limbic_depth_map_renderer":
+                    return n
+                if tname in {"copnet", "cop2net"} and (
+                        n.parm("dm_settings") is not None
+                        or _settings_key(n) in _SETTINGS_STORE):
+                    return n
+            except Exception:
+                pass
         return None
 
     def _ensure_node(self):
@@ -273,6 +346,11 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
     outer = QtWidgets.QVBoxLayout(parent)
     outer.setContentsMargins(8, 8, 8, 8)
     outer.setSpacing(4)
+
+    # ═══ HDA Spawner ════════════════════════════════════════════════════════
+    btn_spawn = QtWidgets.QPushButton("⊕  Spawn Depth Map HDA")
+    btn_spawn.setToolTip("Create a new limbic_depth_map_renderer node in /img")
+    outer.addWidget(btn_spawn)
 
     # ═══ Depth Range ══════════════════════════════════════════════════════
     depth_grp = QtWidgets.QGroupBox("Depth Range")
@@ -437,13 +515,32 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
     outer.addStretch(1)
 
     def _collect() -> dict:
+        near_val = spin_near.value()
+        far_val = spin_far.value()
+        scale_val = spin_scale.value()
+        if cb_custom.isChecked() and near_val >= far_val:
+            hou.ui.displayMessage(
+                f"Near ({near_val:.3f}) must be less than Far ({far_val:.3f}).",
+                title="Depth Map — Validation",
+                severity=hou.severityType.Warning,
+            )
+            far_val = near_val + 1.0
+            spin_far.setValue(far_val)
+        if scale_val == 0.0:
+            hou.ui.displayMessage(
+                "Scale Factor cannot be zero — reset to 1.0.",
+                title="Depth Map — Validation",
+                severity=hou.severityType.Warning,
+            )
+            scale_val = 1.0
+            spin_scale.setValue(scale_val)
         return {
             "use_custom_range":  cb_custom.isChecked(),
-            "near":              spin_near.value(),
-            "far":               spin_far.value(),
+            "near":              near_val,
+            "far":               far_val,
             "normalization":     combo_norm.currentText(),
             "invert":            cb_inv.isChecked(),
-            "scale_factor":      spin_scale.value(),
+            "scale_factor":      scale_val,
             "brightness":       slider_bright.value() / 100.0,
             "contrast":         slider_ctr.value() / 100.0,
             "output_path":       edit_path.text().strip(),
@@ -494,7 +591,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             panel._refresh_node()
             if panel._ensure_node():
                 panel._save(s)
-                OpSetup.execute(panel.node, mask_only=False)
+                with hou.undos.group("Depth Map: Setup Depth Network"):
+                    OpSetup.execute(panel.node, mask_only=False)
             else:
                 hou.ui.displayMessage(
                     "No COP network found. Open a Compositor pane and try again.",
@@ -510,7 +608,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             panel._refresh_node()
             if panel._ensure_node():
                 panel._save(s)
-                OpRender.execute(panel.node, animation=False, mask=False)
+                with hou.undos.group("Depth Map: Render Depth Map"):
+                    OpRender.execute(panel.node, animation=False, mask=False)
             else:
                 hou.ui.displayMessage(
                     "No COP network found. Run Setup first.",
@@ -526,7 +625,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             panel._refresh_node()
             if panel._ensure_node():
                 panel._save(s)
-                OpRender.execute(panel.node, animation=True, mask=False)
+                with hou.undos.group("Depth Map: Render Depth Animation"):
+                    OpRender.execute(panel.node, animation=True, mask=False)
             else:
                 hou.ui.displayMessage(
                     "No COP network found. Run Setup first.",
@@ -540,7 +640,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
         try:
             panel._refresh_node()
             if panel._ensure_node():
-                OpReset.execute(panel.node, mask_only=False)
+                with hou.undos.group("Depth Map: Reset Depth Map"):
+                    OpReset.execute(panel.node, mask_only=False)
             else:
                 hou.ui.displayMessage(
                     "No COP network to reset.", title="Depth Map",
@@ -555,7 +656,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             panel._refresh_node()
             if panel._ensure_node():
                 panel._save(s)
-                OpSetup.execute(panel.node, mask_only=True)
+                with hou.undos.group("Depth Map: Setup Mask Network"):
+                    OpSetup.execute(panel.node, mask_only=True)
             else:
                 hou.ui.displayMessage(
                     "No COP network found. Open a Compositor pane and try again.",
@@ -572,7 +674,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             panel._refresh_node()
             if panel._ensure_node():
                 panel._save(s)
-                OpRender.execute(panel.node, animation=False, mask=True)
+                with hou.undos.group("Depth Map: Render Mask"):
+                    OpRender.execute(panel.node, animation=False, mask=True)
             else:
                 hou.ui.displayMessage(
                     "No COP network found. Run Mask Setup first.",
@@ -589,7 +692,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             panel._refresh_node()
             if panel._ensure_node():
                 panel._save(s)
-                OpRender.execute(panel.node, animation=True, mask=True)
+                with hou.undos.group("Depth Map: Render Mask Animation"):
+                    OpRender.execute(panel.node, animation=True, mask=True)
             else:
                 hou.ui.displayMessage(
                     "No COP network found. Run Mask Setup first.",
@@ -603,7 +707,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
         try:
             panel._refresh_node()
             if panel._ensure_node():
-                OpReset.execute(panel.node, mask_only=True)
+                with hou.undos.group("Depth Map: Reset Mask"):
+                    OpReset.execute(panel.node, mask_only=True)
             else:
                 hou.ui.displayMessage(
                     "No COP network to reset.", title="Depth Map",
@@ -613,6 +718,21 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
                                   title="Depth Map Error",
                                   severity=hou.severityType.Error)
 
+    def _on_spawn():
+        try:
+            new_node = spawn_hda()
+            if new_node is not None:
+                panel.node = new_node
+                panel._ensure_parm()
+                _load_ui()
+        except Exception as e:
+            hou.ui.displayMessage(
+                f"Spawn failed:\n{e}",
+                title="Depth Map Error",
+                severity=hou.severityType.Error,
+            )
+
+    btn_spawn.clicked.connect(_on_spawn)
     btn_setup.clicked.connect(_on_setup)
     btn_render.clicked.connect(_on_render)
     btn_anim.clicked.connect(_on_anim)

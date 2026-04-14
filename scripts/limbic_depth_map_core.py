@@ -277,9 +277,12 @@ def add_dm_settings_parm(node) -> bool:
         return True
     try:
         pg = node.parmTemplateGroup()
-        pg.addParmTemplate(hou.StringParmTemplate(
-            "dm_settings", "", 1,
-            default_value=json.dumps(DEFAULT_SETTINGS), hide=True))
+        # Note: 'hide' kwarg is invalid in H21+ — call .hide(True) on the template
+        pt = hou.StringParmTemplate(
+            "dm_settings", "DM Settings", 1,
+            default_value=[json.dumps(DEFAULT_SETTINGS)])
+        pt.hide(True)
+        pg.addParmTemplate(pt)
         node.setParmTemplateGroup(pg)
         return node.parm("dm_settings") is not None
     except Exception as e:
@@ -298,13 +301,24 @@ def dm_children(node):
 
 def output_dir(settings: dict, key: str = "output_path",
                fallback: str = "depth_maps") -> str:
+    """Return the output directory, creating it if needed.
+
+    Handles both directory paths ("$HIP/depth_maps/") and
+    file paths ("$HIP/Render/Temp/Depth.jpg") gracefully —
+    the latter's parent directory is used.
+    """
     import hou
     path = settings.get(key, "").strip()
     if not path:
         path = hou.expandString(f"$HIP/{fallback}/")
     path = hou.expandString(path)
+    # If path looks like a file (has extension), use its parent dir
+    import posixpath
+    _, ext = posixpath.splitext(path)
+    if ext:
+        path = os.path.dirname(path)
     os.makedirs(path, exist_ok=True)
-    return path
+    return path if path.endswith(os.sep) else path + os.sep
 
 
 def filename(settings: dict, prefix: str, frame=None) -> str:
@@ -442,8 +456,9 @@ def _set_range_parms(rmap, near, far, inv, be):
 
 def _set_scale_parms(scale_node, sf, be):
     if be == "cop":
+        # H21 function COP: func=0 (multiply), parm name is "scale" not "val1a"
         scale_node.parm("func").set(0)
-        scale_node.parm("val1a").set(sf)
+        scale_node.parm("scale").set(sf)
     else:
         scale_node.parm("scale1").set(sf)
 
@@ -500,6 +515,7 @@ def build_depth_network(node, settings: dict):
         _set_label(rmap, "Depth Range Mapper")
         rmap.setPosition(hou.Vector2(STEP, 0))
         _set_range_parms(rmap, near, far, inv, be)
+        rmap.setInput(0, src, 0)  # LINEAR: explicitly wire src → remap
         normalize = rmap
 
     x = (norm_node_count + 1) * STEP
@@ -652,7 +668,7 @@ def setup_depth(node, mask_only=False) -> bool:
             settings["setup_complete"] = True
         save_settings(node, settings)
         mode = "Mask" if mask_only else "Depth"
-        notify(node, hou.severityType.Important,
+        notify(node, hou.severityType.ImportantMessage,
                f"Depth Map: {mode} network created")
         return True
     except Exception as e:
@@ -682,7 +698,7 @@ def render_depth(node, animation=False, mask=False) -> bool:
 
         frames = list(frame_range(settings)) if animation else [hou.frame()]
         if animation:
-            notify(node, hou.severityType.Important,
+            notify(node, hou.severityType.ImportantMessage,
                    f"Depth Map: rendering {len(frames)} {prefix} frames...")
 
         be = backend()
@@ -701,7 +717,7 @@ def render_depth(node, animation=False, mask=False) -> bool:
                 fout.parm("file").set(os.path.join(odir, fname))
                 fout.cook(force=True)
 
-        notify(node, hou.severityType.Important,
+        notify(node, hou.severityType.ImportantMessage,
                f"Depth Map: rendered {len(frames)} {prefix} frame(s) -> {odir}")
         return True
 
@@ -729,7 +745,7 @@ def reset_depth(node, mask_only=False) -> bool:
             settings["setup_complete"] = False
         save_settings(node, settings)
 
-        notify(node, hou.severityType.Important,
+        notify(node, hou.severityType.ImportantMessage,
                "Depth Map: network reset")
         return True
     except Exception as e:
