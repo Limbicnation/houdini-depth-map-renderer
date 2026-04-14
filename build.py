@@ -3,13 +3,16 @@
 
 The .otlc is a tar archive containing:
     - Houdini archive (.hda) format files
-    - The embedded Python module (depth_map_panel.py)
-    - Node definition XML
+    - The shared core module (limbic_depth_map_core.py)
+    - The HDA PythonModule wrapper (python_module.py)
+    - The OnCreated callback (on_created.py)
+    - The Python Panel UI (depth_map_panel.py)
+    - Node definition XML with explicit parameter interface
 
 Usage:
     python3 build.py                          # default output: ./HDAs/
     python3 build.py --out ./HDAs/my.otlc     # custom output path
-    python3 build.py --install                # build and install to ~/houdini18.0/otls/
+    python3 build.py --install                # build and install to ~/houdiniXX.X/otls/
 """
 
 from __future__ import annotations
@@ -20,17 +23,15 @@ from datetime import datetime, timezone
 
 SRC_ROOT = Path(__file__).parent.resolve()
 
-# ── HDA archive manifest ─────────────────────────────────────────────────────
-
 HDA_METADATA = {
     "name":            "limbic_depth_map_renderer",
     "table":           "Driver/cop",
     "label":           "Depth Map Renderer",
     "category":        "Limic",
-    "version":         (2, 0, 0),
+    "version":         (2, 1, 0),
     "min_houdini":     (18, 0),
     "python":          True,
-    "python_module":   "python_panels.depth_map_panel",
+    "python_module":   "scripts.python_module",
     "description":     (
         "Limbic Depth Map Renderer — one-click depth map pipeline. "
         "Mirrors the Blender Depth Map Generator workflow: Z-pass → Range → "
@@ -42,34 +43,21 @@ HDA_METADATA = {
     "external_data":   False,
 }
 
-# Nodes created at runtime (semantic keys — actual types depend on Houdini version)
 COP_NODES = [
     {"id": 1, "key": "source",      "name": "DM_Source",    "label": "Z-Depth Source"},
     {"id": 2, "key": "range",       "name": "DM_RangeMap",  "label": "Depth Range Mapper"},
-    {"id": 3, "key": "contrast",    "name": "DM_Contrast",  "label": "Depth Contrast"},
-    {"id": 4, "key": "grayscale",   "name": "DM_Grayscale", "label": "Grayscale Output"},
-    {"id": 5, "key": "file_output", "name": "DM_FileOut",   "label": "Depth File Output"},
+    {"id": 3, "key": "log",         "name": "DM_LOG",       "label": "Log Normalize"},
+    {"id": 4, "key": "brightness",  "name": "DM_Brightness","label": "Brightness"},
+    {"id": 5, "key": "contrast",    "name": "DM_Contrast",  "label": "Depth Contrast"},
+    {"id": 6, "key": "scale",       "name": "DM_Scale",     "label": "Depth Scale"},
+    {"id": 7, "key": "grayscale",   "name": "DM_Grayscale", "label": "Grayscale Output"},
+    {"id": 8, "key": "file_output", "name": "DM_FileOut",   "label": "Depth File Output"},
 ]
 
 
-# ── Build functions ─────────────────────────────────────────────────────────
-
 def _hda_archive(otlc_path: Path, src_root: Path):
-    """Generate a minimal .otlc (tar) archive.
-
-    Real Houdini .otlc files contain compiled C++ HDAs.
-    For a Python-only plugin this script creates a *scaffold* .otlc that:
-      1. Registers the Python Panel interface
-      2. Sets up the COP HDA type
-      3. Embeds the Python source for runtime network construction
-
-    Users running this should import the resulting .otlc in Houdini via:
-        File → Import → HDA File...
-    """
-
     members = []
 
-    # 1. Contents manifest
     manifest = {
         "build_date":    datetime.now(timezone.utc).isoformat(),
         "build_host":    os.environ.get("HOSTNAME", "unknown"),
@@ -78,43 +66,34 @@ def _hda_archive(otlc_path: Path, src_root: Path):
         "python_files": [],
     }
 
-    # 2. Embed python_panels/depth_map_panel.py
-    panel_src = src_root / "python_panels" / "depth_map_panel.py"
-    if panel_src.exists():
-        manifest["python_files"].append(str(panel_src.relative_to(src_root)))
-        members.append(("python_panels/depth_map_panel.py", panel_src.read_bytes()))
+    python_files = [
+        ("scripts/limbic_depth_map_core.py", src_root / "scripts" / "limbic_depth_map_core.py"),
+        ("scripts/python_module.py",         src_root / "scripts" / "python_module.py"),
+        ("scripts/on_created.py",            src_root / "scripts" / "on_created.py"),
+        ("python_panels/depth_map_panel.py", src_root / "python_panels" / "depth_map_panel.py"),
+        ("config/shelf_actions.py",          src_root / "config" / "shelf_actions.py"),
+    ]
 
-    # 3. Embed installer
+    for arc_name, src_path in python_files:
+        if src_path.exists():
+            manifest["python_files"].append(arc_name)
+            members.append((arc_name, src_path.read_bytes()))
+
     installer_src = src_root / "installer" / "install.py"
     if installer_src.exists():
-        manifest["python_files"].append(str(installer_src.relative_to(src_root)))
+        manifest["python_files"].append("installer/install.py")
         members.append(("installer/install.py", installer_src.read_bytes()))
 
-    # 4. Embed shelf actions
-    shelf_src = src_root / "config" / "shelf_actions.py"
-    if shelf_src.exists():
-        manifest["python_files"].append(str(shelf_src.relative_to(src_root)))
-        members.append(("config/shelf_actions.py", shelf_src.read_bytes()))
-
-    # 5. Write manifest
     manifest_json = json.dumps(manifest, indent=2).encode("utf-8")
     members.append(("manifest.json", manifest_json))
 
-    # 6. Write README
     readme_src = src_root / "README.md"
     if readme_src.exists():
         members.append(("README.md", readme_src.read_bytes()))
 
-    # 7. Write AGENTS.md
-    agents_src = src_root / "AGENTS.md"
-    if agents_src.exists():
-        members.append(("AGENTS.md", agents_src.read_bytes()))
-
-    # 8. Embed NodeDefinition XML so Houdini registers the operator correctly
     node_def_xml = _generate_node_def().encode("utf-8")
     members.append(("NodeDefinition.xml", node_def_xml))
 
-    # 9. Build tar
     otlc_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(otlc_path, "w:xz", preset=6) as tar:
         for name, data in members:
@@ -126,11 +105,53 @@ def _hda_archive(otlc_path: Path, src_root: Path):
 
 
 def _generate_node_def() -> str:
-    """Return a NodeDefinition XML string for the HDA.
+    sys.path.insert(0, str(SRC_ROOT / "scripts"))
+    from limbic_depth_map_core import PARM_DEFS
 
-    This is what Houdini parses when importing the .otlc to understand
-    the operator's parameters, type, and Python script interface.
-    """
+    parm_lines = []
+    parm_lines.append(
+        '  <parm name="dm_settings" stype="string" default="" len="1" '
+        'label="Internal Settings" visible="0"/>'
+    )
+    parm_lines.append(
+        '  <parm name="cop_backend" stype="string" default="" len="1" '
+        'label="COP Backend" visible="0"/>'
+    )
+
+    for parm_name, label, ptype, default, menu_items in PARM_DEFS:
+        if ptype == "toggle":
+            parm_lines.append(
+                f'  <parm name="{parm_name}" stype="int" default="{default}" '
+                f'len="1" label="{label}"/>'
+            )
+        elif ptype == "float":
+            parm_lines.append(
+                f'  <parm name="{parm_name}" stype="float" default="{default}" '
+                f'len="1" label="{label}"/>'
+            )
+        elif ptype == "int":
+            parm_lines.append(
+                f'  <parm name="{parm_name}" stype="int" default="{default}" '
+                f'len="1" label="{label}"/>'
+            )
+        elif ptype == "string":
+            if menu_items:
+                menu_str = "\\n".join(
+                    f"{item}\\n{item}" for item in menu_items
+                )
+                parm_lines.append(
+                    f'  <parm name="{parm_name}" stype="string" '
+                    f'default="{default}" len="1" label="{label}" '
+                    f'menu="{{menu_str}}"/>'
+                )
+            else:
+                parm_lines.append(
+                    f'  <parm name="{parm_name}" stype="string" '
+                    f'default="{default}" len="1" label="{label}"/>'
+                )
+
+    parmlist = "\n".join(parm_lines)
+
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <source type="copnet">
@@ -138,12 +159,10 @@ def _generate_node_def() -> str:
 <label>Depth Map Renderer</label>
 <table>Driver/cop</table>
 <parmlist>
-  <parm name="dm_settings" stype="string" default="" len="1"
-        label="Internal Settings" visible="0"/>
+{parmlist}
 </parmlist>
 <python_callbacks>
-  <callback oncreate="python_panels.depth_map_panel.register_operators"/>
-  <callback onview="python_panels.depth_map_panel.register_operators"/>
+  <callback oncreate="scripts.on_created.onCreate"/>
 </python_callbacks>
 <help>\
 Limbic Depth Map Renderer — one-click depth map pipeline.
@@ -152,8 +171,6 @@ See README.md for usage instructions.
 </source>
 """
 
-
-# ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description="Build Limbic Depth Map Renderer HDA")
@@ -166,7 +183,7 @@ def main():
     ap.add_argument(
         "--install",
         action="store_true",
-        help="Also copy to ~/houdini18.0/otls/ after building",
+        help="Also copy to ~/houdiniXX.X/otls/ after building",
     )
     ap.add_argument(
         "--verbose", "-v",
@@ -189,19 +206,18 @@ def main():
             for m in tar.getmembers():
                 print(f"  {m.name:<50}  {m.size:>8} bytes")
 
-    print("\n✅ HDA scaffold built.")
-    print("   Next: open Houdini → File → Import → HDA File… → select this .otlc")
+    print("\nHDA built successfully.")
+    print("   Next: open Houdini → File → Import → HDA File → select this .otlc")
 
     if args.install:
         import shutil
-        # Detect Houdini version from $HFS (same logic as installer/install.py)
         hfs = os.environ.get("HFS", "")
         if hfs:
             hver = Path(hfs).name.lower()
             if not hver.startswith("houdini"):
-                hver = "houdini18.0"  # fallback if HFS path is unexpected
+                hver = "houdini18.0"
         else:
-            hver = "houdini18.0"  # fallback when $HFS not set
+            hver = "houdini18.0"
         hda_dest = Path.home() / hver / "otls" / path.name
         hda_dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, hda_dest)
