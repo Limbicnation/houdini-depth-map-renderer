@@ -41,24 +41,12 @@ def backend() -> str:
     import hou
     global _COP_BACKEND
     if _COP_BACKEND is None:
-        try:
-            img = hou.node("/img")
-            if img is not None:
-                child_types = img.childTypeCategory().nodeTypes()
-                if "copnet" in child_types:
-                    _COP_BACKEND = "cop"
-                elif "cop2net" in child_types:
-                    _COP_BACKEND = "cop2"
-                else:
-                    _COP_BACKEND = (
-                        "cop" if hou.applicationVersion()[0] >= 21 else "cop2"
-                    )
-            else:
-                _COP_BACKEND = (
-                    "cop" if hou.applicationVersion()[0] >= 21 else "cop2"
-                )
-        except Exception:
-            _COP_BACKEND = "cop2"
+        # Force cop2 for now.  H21's new COP backend has a fundamental
+        # data-flow issue: the `file` node output cannot be consumed by
+        # `remap` or other downstream nodes (they report "source is
+        # missing").  H21 still ships cop2net and cop2::* node types,
+        # so we use those until SideFX fixes the cop pipeline.
+        _COP_BACKEND = "cop2"
     return _COP_BACKEND
 
 
@@ -116,6 +104,27 @@ def _safe_set_display(node, display_node):
             node.setDisplayNode(display_node)
         except Exception:
             pass
+
+
+def _wire(node, upstream, be, input_name='source', input_idx=0,
+          output_idx=0):
+    """Connect upstream → node.  Dispatches by COP backend.
+
+    H21+ ``cop`` nodes expose named inputs (e.g. 'source') so
+    setNamedInput is preferred.  cop2 nodes use positional
+    setInput(index, …).  Falls back gracefully so a single code
+    path works across both backends.
+    """
+    if be == "cop":
+        try:
+            node.setNamedInput(input_name, upstream, output_idx)
+            return
+        except (TypeError, AttributeError):
+            pass
+    try:
+        node.setInput(input_idx, upstream, output_idx)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -498,7 +507,7 @@ def build_depth_network(node, settings: dict):
         log_node = _create_node(node, "log", NODE_PREFIX + "LOG")
         _set_label(log_node, "Log Normalize")
         log_node.setPosition(hou.Vector2(STEP, 0))
-        log_node.setInput(0, src, 0)
+        _wire(log_node, src, be)
         log_node.parm("func").set(1)
         log_node.parm("func_math").set(3)
 
@@ -508,14 +517,14 @@ def build_depth_network(node, settings: dict):
         log_min = 0.0
         log_max = math.log(max(far, 0.001))
         _set_range_parms(rmap, log_min, log_max, inv, be)
-        rmap.setInput(0, log_node, 0)
+        _wire(rmap, log_node, be)
         normalize = rmap
     else:
         rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
         _set_label(rmap, "Depth Range Mapper")
         rmap.setPosition(hou.Vector2(STEP, 0))
         _set_range_parms(rmap, near, far, inv, be)
-        rmap.setInput(0, src, 0)  # LINEAR: explicitly wire src → remap
+        _wire(rmap, src, be)
         normalize = rmap
 
     x = (norm_node_count + 1) * STEP
@@ -524,7 +533,7 @@ def build_depth_network(node, settings: dict):
     bright.setPosition(hou.Vector2(x, 0))
     bright.parm("bright" if be == "cop" else "brightness").set(
         settings.get("brightness", 0.0))
-    bright.setInput(0, normalize, 0)
+    _wire(bright, normalize, be)
 
     x += STEP
     ctr = _create_node(node, "contrast", NODE_PREFIX + "Contrast")
@@ -532,14 +541,14 @@ def build_depth_network(node, settings: dict):
     ctr.setPosition(hou.Vector2(x, 0))
     ctr.parm("contrast" if be == "cop" else "gain").set(
         1.0 + settings.get("contrast", 0.2))
-    ctr.setInput(0, bright, 0)
+    _wire(ctr, bright, be)
 
     x += STEP
     scale = _create_node(node, "scale", NODE_PREFIX + "Scale")
     _set_label(scale, "Depth Scale")
     scale.setPosition(hou.Vector2(x, 0))
     _set_scale_parms(scale, sf, be)
-    scale.setInput(0, ctr, 0)
+    _wire(scale, ctr, be)
 
     x += STEP
     gray = _create_node(node, "grayscale", NODE_PREFIX + "Grayscale")
@@ -547,7 +556,7 @@ def build_depth_network(node, settings: dict):
     gray.setPosition(hou.Vector2(x, 0))
     if be == "cop2":
         gray.parm("copoutput").set("bw")
-    gray.setInput(0, scale, 0)
+    _wire(gray, scale, be)
 
     x += STEP
     fout = _create_node(node, "file_output", NODE_PREFIX + "FileOut")
@@ -556,15 +565,13 @@ def build_depth_network(node, settings: dict):
     odir = output_dir(settings, "output_path", "depth_maps")
     fname = filename(settings, "depth_map")
     _set_file_output_parms(fout, gray, odir, fname, settings, be)
-    if be == "cop2":
-        fout.setInput(0, gray, 0)
+    _wire(fout, gray, be)
 
     if settings.get("preview", False):
         viewer = _create_node(node, "viewer", NODE_PREFIX + "Viewer")
         _set_label(viewer, "Depth Preview")
         viewer.setPosition(hou.Vector2(x, 100))
-        if be == "cop2":
-            viewer.setInput(0, gray, 0)
+        _wire(viewer, gray, be)
 
     display = gray if be == "cop" else fout
     _safe_set_display(node, display)
@@ -591,7 +598,7 @@ def build_mask_network(node, settings: dict):
             mask_input = _create_node(node, "source", NODE_PREFIX + "MaskInput")
             _set_label(mask_input, "Cryptomatte EXR Source — set path")
             mask_input.setPosition(hou.Vector2(-200, Y))
-            mask_src.setInput(0, mask_input, 0)
+            _wire(mask_src, mask_input, be)
 
     elif be == "cop" and source == "OBJECT_INDEX":
         mask_input = _create_node(node, "sopimport", NODE_PREFIX + "MaskInput")
@@ -605,7 +612,7 @@ def build_mask_network(node, settings: dict):
         mask_src = _create_node(node, "rasterize", NODE_PREFIX + "MSource")
         _set_label(mask_src, "Rasterize Geo to Mask")
         mask_src.setPosition(hou.Vector2(0, Y))
-        mask_src.setInput(0, mask_input, 0)
+        _wire(mask_src, mask_input, be)
 
     else:
         mask_src = _create_node(node, "idtomask", NODE_PREFIX + "MSource")
@@ -624,7 +631,7 @@ def build_mask_network(node, settings: dict):
         convert_.setPosition(hou.Vector2(x, Y))
         if be == "cop2":
             convert_.parm("copoutput").set("rgba")
-        convert_.setInput(0, mask_src, 0)
+        _wire(convert_, mask_src, be)
         mask_out = convert_
     else:
         mask_out = _create_node(node, "grayscale", NODE_PREFIX + "MGrayscale")
@@ -632,7 +639,7 @@ def build_mask_network(node, settings: dict):
         mask_out.setPosition(hou.Vector2(x, Y))
         if be == "cop2":
             mask_out.parm("copoutput").set("bw")
-        mask_out.setInput(0, mask_src, 0)
+        _wire(mask_out, mask_src, be)
 
     x += STEP
     mfout = _create_node(node, "file_output", NODE_PREFIX + "MaskFileOut")
@@ -643,8 +650,7 @@ def build_mask_network(node, settings: dict):
     fname = filename(settings, "mask_map")
     mask_settings = {**settings, "format": "PNG", "bit_depth": "16"}
     _set_file_output_parms(mfout, mask_out, odir, fname, mask_settings, be)
-    if be == "cop2":
-        mfout.setInput(0, mask_out, 0)
+    _wire(mfout, mask_out, be)
 
     display = mask_out if be == "cop" else mfout
     _safe_set_display(node, display)

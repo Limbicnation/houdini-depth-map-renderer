@@ -52,7 +52,7 @@ def limbic_setup():
         if ok:
             hou.ui.setStatusMessage(
                 "Limbic Depth Map: network created",
-                severity=hou.severityType.Important)
+                severity=hou.severityType.ImportantMessage)
     except Exception as e:
         hou.ui.displayMessage(f"Setup failed:\n{e}", title="Error",
                               severity=hou.severityType.Error)
