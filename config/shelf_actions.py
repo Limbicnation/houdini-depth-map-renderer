@@ -136,7 +136,7 @@ def limbic_spawn(node_name: str = "depth_map") -> None:
 # ── Shelf registration ──────────────────────────────────────────────────────
 
 try:
-    shelf = hou.shelves.fetch("Limbic", create=True)
+    shelf = hou.shelves.fetch("Limbicnation", create=True)
 except Exception:
     shelf = None
 

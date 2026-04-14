@@ -35,7 +35,7 @@ from settings_model import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 NODE_PREFIX = "DM_"
-HDA_CATEGORY = "Limic"
+HDA_CATEGORY = "Limbicnation"
 LAYOUT_STEP_X = 200
 LAYOUT_MASK_Y = -300
 

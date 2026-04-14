@@ -211,10 +211,10 @@ def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
 
     try:
         with hou.undos.group("Spawn Depth Map HDA"):
-            hda_type = hou.nodeType("Driver/cop/limbic_depth_map_renderer")
+            hda_type = hou.nodeType("Driver/cop/gero::depth_map_renderer")
             if hda_type is not None:
                 node = img.createNode(
-                    "limbic_depth_map_renderer", final_name)
+                    "gero::depth_map_renderer", final_name)
             else:
                 node = img.createNode(_container_type(), final_name)
                 add_dm_settings_parm(node)
@@ -295,7 +295,8 @@ class DepthMapPanel:
         for n in img.children():
             try:
                 tname = n.type().name()
-                if tname == "limbic_depth_map_renderer":
+                if tname in ("gero::depth_map_renderer",
+                             "limbic_depth_map_renderer"):
                     return n
                 if tname in {"copnet", "cop2net"} and (
                         n.parm("dm_settings") is not None

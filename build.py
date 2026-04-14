@@ -24,10 +24,11 @@ from datetime import datetime, timezone
 SRC_ROOT = Path(__file__).parent.resolve()
 
 HDA_METADATA = {
-    "name":            "limbic_depth_map_renderer",
+    "name":            "depth_map_renderer",
+    "namespace":       "gero",
     "table":           "Driver/cop",
     "label":           "Depth Map Renderer",
-    "category":        "Limic",
+    "category":        "Limbicnation",
     "version":         (2, 1, 0),
     "min_houdini":     (18, 0),
     "python":          True,
@@ -155,12 +156,16 @@ def _generate_node_def() -> str:
 
     parmlist = "\n".join(parm_lines)
 
+    hda_name = f'{HDA_METADATA["namespace"]}::{HDA_METADATA["name"]}'
+    hda_label = HDA_METADATA["label"]
+    hda_table = HDA_METADATA["table"]
+
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <source type="copnet">
-<name>limbic_depth_map_renderer</name>
-<label>Depth Map Renderer</label>
-<table>Driver/cop</table>
+<name>{hda_name}</name>
+<label>{hda_label}</label>
+<table>{hda_table}</table>
 <parmlist>
 {parmlist}
 </parmlist>
@@ -180,8 +185,8 @@ def main():
     ap.add_argument(
         "--out",
         type=Path,
-        default=SRC_ROOT / "HDAs" / "limbic_depth_map_renderer.hda",
-        help="Output .hda path (default: ./HDAs/limbic_depth_map_renderer.hda)",
+        default=SRC_ROOT / "HDAs" / "gero_depth_map_renderer.hda",
+        help="Output .hda path (default: ./HDAs/gero_depth_map_renderer.hda)",
     )
     ap.add_argument(
         "--install",
