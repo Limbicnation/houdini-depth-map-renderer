@@ -67,11 +67,12 @@ def _hda_archive(otlc_path: Path, src_root: Path):
     }
 
     python_files = [
-        ("scripts/limbic_depth_map_core.py", src_root / "scripts" / "limbic_depth_map_core.py"),
-        ("scripts/python_module.py",         src_root / "scripts" / "python_module.py"),
-        ("scripts/on_created.py",            src_root / "scripts" / "on_created.py"),
-        ("python_panels/depth_map_panel.py", src_root / "python_panels" / "depth_map_panel.py"),
-        ("config/shelf_actions.py",          src_root / "config" / "shelf_actions.py"),
+        ("scripts/settings_model.py",          src_root / "scripts" / "settings_model.py"),
+        ("scripts/limbic_depth_map_core.py",   src_root / "scripts" / "limbic_depth_map_core.py"),
+        ("scripts/python_module.py",           src_root / "scripts" / "python_module.py"),
+        ("scripts/on_created.py",              src_root / "scripts" / "on_created.py"),
+        ("python_panels/depth_map_panel.py",   src_root / "python_panels" / "depth_map_panel.py"),
+        ("config/shelf_actions.py",            src_root / "config" / "shelf_actions.py"),
     ]
 
     for arc_name, src_path in python_files:
@@ -105,7 +106,9 @@ def _hda_archive(otlc_path: Path, src_root: Path):
 
 
 def _generate_node_def() -> str:
-    sys.path.insert(0, str(SRC_ROOT / "scripts"))
+    scripts_dir = str(SRC_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
     from limbic_depth_map_core import PARM_DEFS
 
     parm_lines = []
@@ -207,7 +210,7 @@ def main():
                 print(f"  {m.name:<50}  {m.size:>8} bytes")
 
     print("\nHDA built successfully.")
-    print("   Next: open Houdini → File → Import → HDA File → select this .otlc")
+    print("   Next: open Houdini → File → Import → HDA File → select this .hda")
 
     if args.install:
         import shutil

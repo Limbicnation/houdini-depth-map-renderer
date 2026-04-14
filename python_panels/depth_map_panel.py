@@ -81,9 +81,7 @@ from limbic_depth_map_core import (  # noqa: E402
     reset_depth,
     reset_backend_cache,
 )
-
-# Backwards-compatible alias (HDA PythonModule compatibility)
-_backend = backend
+from settings_model import DepthMapSettings  # noqa: E402
 
 # ── Houdini 21.0 UI Bug Workaround ─────────────────────────────────────────
 # H21+ new COP node types don't expose outputNames() the same way COP2 did.
@@ -554,56 +552,57 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
             )
             scale_val = 1.0
             spin_scale.setValue(scale_val)
-        return {
-            "use_custom_range":  cb_custom.isChecked(),
-            "near":              near_val,
-            "far":               far_val,
-            "normalization":     combo_norm.currentText(),
-            "invert":            cb_inv.isChecked(),
-            "scale_factor":      scale_val,
-            "brightness":       slider_bright.value() / 100.0,
-            "contrast":         slider_ctr.value() / 100.0,
-            "output_path":       edit_path.text().strip(),
-            "format":            combo_fmt.currentText(),
-            "bit_depth":        "16" if combo_bits.currentText() == "16-bit" else "8",
-            "preview":           cb_preview.isChecked(),
-            "animation":         cb_anim.isChecked(),
-            "use_scene_range":   cb_scene.isChecked(),
-            "frame_start":       spin_start.value(),
-            "frame_end":         spin_end.value(),
-            "mask_enabled":       cb_mask_on.isChecked(),
-            "mask_source":       combo_mask_src.currentText(),
-            "mask_index":        spin_midx.value(),
-            "mask_format":       combo_mask_fmt.currentText(),
-            "mask_output_path":  edit_mask_path.text().strip(),
-        }
+        s = DepthMapSettings(
+            use_custom_range=cb_custom.isChecked(),
+            near=near_val,
+            far=far_val,
+            normalization=combo_norm.currentText(),
+            invert=cb_inv.isChecked(),
+            scale_factor=scale_val,
+            brightness=slider_bright.value() / 100.0,
+            contrast=slider_ctr.value() / 100.0,
+            output_path=edit_path.text().strip(),
+            format=combo_fmt.currentText(),
+            bit_depth="16" if combo_bits.currentText() == "16-bit" else "8",
+            preview=cb_preview.isChecked(),
+            animation=cb_anim.isChecked(),
+            use_scene_range=cb_scene.isChecked(),
+            frame_start=spin_start.value(),
+            frame_end=spin_end.value(),
+            mask_enabled=cb_mask_on.isChecked(),
+            mask_source=combo_mask_src.currentText(),
+            mask_index=spin_midx.value(),
+            mask_format=combo_mask_fmt.currentText(),
+            mask_output_path=edit_mask_path.text().strip(),
+        )
+        return s.to_dict()
 
     def _load_ui():
-        s = panel._current_settings()
-        cb_custom.setChecked(s.get("use_custom_range", False))
-        spin_near.setValue(s.get("near", 0.1))
-        spin_far.setValue(s.get("far", 1000.0))
-        combo_norm.setCurrentText(s.get("normalization", "LINEAR"))
-        cb_inv.setChecked(s.get("invert", True))
-        spin_scale.setValue(s.get("scale_factor", 1.0))
-        slider_bright.setValue(int(s.get("brightness", 0.0) * 100))
-        lbl_bright.setText(f"{s.get('brightness', 0.0):.2f}")
-        slider_ctr.setValue(int(s.get("contrast", 0.2) * 100))
-        lbl_ctr.setText(f"{s.get('contrast', 0.2):.2f}")
-        edit_path.setText(s.get("output_path", ""))
-        combo_fmt.setCurrentText(s.get("format", "PNG"))
+        s = DepthMapSettings.from_dict(panel._current_settings())
+        cb_custom.setChecked(s.use_custom_range)
+        spin_near.setValue(s.near)
+        spin_far.setValue(s.far)
+        combo_norm.setCurrentText(s.normalization)
+        cb_inv.setChecked(s.invert)
+        spin_scale.setValue(s.scale_factor)
+        slider_bright.setValue(int(s.brightness * 100))
+        lbl_bright.setText(f"{s.brightness:.2f}")
+        slider_ctr.setValue(int(s.contrast * 100))
+        lbl_ctr.setText(f"{s.contrast:.2f}")
+        edit_path.setText(s.output_path)
+        combo_fmt.setCurrentText(s.format)
         combo_bits.setCurrentText(
-            "16-bit" if s.get("bit_depth") == "16" else "8-bit")
-        cb_preview.setChecked(s.get("preview", False))
-        cb_anim.setChecked(s.get("animation", False))
-        cb_scene.setChecked(s.get("use_scene_range", True))
-        spin_start.setValue(s.get("frame_start", 1))
-        spin_end.setValue(s.get("frame_end", 250))
-        cb_mask_on.setChecked(s.get("mask_enabled", False))
-        combo_mask_src.setCurrentText(s.get("mask_source", "OBJECT_INDEX"))
-        spin_midx.setValue(s.get("mask_index", 1))
-        combo_mask_fmt.setCurrentText(s.get("mask_format", "GRAYSCALE"))
-        edit_mask_path.setText(s.get("mask_output_path", ""))
+            "16-bit" if s.bit_depth == "16" else "8-bit")
+        cb_preview.setChecked(s.preview)
+        cb_anim.setChecked(s.animation)
+        cb_scene.setChecked(s.use_scene_range)
+        spin_start.setValue(s.frame_start)
+        spin_end.setValue(s.frame_end)
+        cb_mask_on.setChecked(s.mask_enabled)
+        combo_mask_src.setCurrentText(s.mask_source)
+        spin_midx.setValue(s.mask_index)
+        combo_mask_fmt.setCurrentText(s.mask_format)
+        edit_mask_path.setText(s.mask_output_path)
 
     def _on_setup():
         try:

@@ -16,6 +16,15 @@ import json
 import math
 import sys
 
+from settings_model import (
+    DepthMapSettings,
+    generate_parm_defs,
+    generate_parm_map,
+    generate_default_settings,
+    parm_name as _parm_name,
+    _INTERNAL_FIELDS,
+)
+
 # NOTE: `import hou` is done LAZILY inside each function that needs it.
 # This allows build.py (which runs in system Python3, outside Houdini) to
 # import pure-data constants like PARM_DEFS, _NODE_MAP, DEFAULT_SETTINGS
@@ -143,91 +152,15 @@ def _wire(node, upstream, be, input_name='source', input_idx=0,
 # Default Settings
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_SETTINGS = {
-    "setup_complete":      False,
-    "mask_setup_complete": False,
-    "use_custom_range":    False,
-    "near":                0.1,
-    "far":                1000.0,
-    "normalization":       "LINEAR",
-    "scale_factor":        1.0,
-    "invert":              True,
-    "contrast":            0.2,
-    "brightness":          0.0,
-    "output_path":         "",
-    "format":              "PNG",
-    "bit_depth":           "16",
-    "preview":             False,
-    "animation":           False,
-    "use_scene_range":     True,
-    "frame_start":         1,
-    "frame_end":          250,
-    "mask_enabled":        False,
-    "mask_source":         "OBJECT_INDEX",
-    "mask_index":          1,
-    "mask_format":         "GRAYSCALE",
-    "mask_output_path":    "",
-}
+DEFAULT_SETTINGS = generate_default_settings()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HDA Explicit Parameter Interface
 # ─────────────────────────────────────────────────────────────────────────────
 
-# HDA parm name → settings key
-_PARM_MAP = {
-    "usecustomrange": "use_custom_range",
-    "near":           "near",
-    "far":            "far",
-    "normalization":  "normalization",
-    "scalefactor":    "scale_factor",
-    "invert":         "invert",
-    "brightness":     "brightness",
-    "contrast":       "contrast",
-    "outputpath":     "output_path",
-    "format":         "format",
-    "bitdepth":       "bit_depth",
-    "preview":        "preview",
-    "animation":      "animation",
-    "usescenerange":  "use_scene_range",
-    "framestart":     "frame_start",
-    "frameend":       "frame_end",
-    "maskenabled":    "mask_enabled",
-    "masksource":     "mask_source",
-    "maskindex":      "mask_index",
-    "maskformat":    "mask_format",
-    "maskoutputpath": "mask_output_path",
-}
+_PARM_MAP = generate_parm_map()
 
-# Parm definitions for build.py to generate the NodeDefinition XML.
-# Each tuple: (parm_name, label, parm_type, default, menu_items_or_None)
-PARM_DEFS = [
-    ("usecustomrange",  "Custom Near/Far Range", "toggle",  "0",   None),
-    ("near",            "Near",                   "float",   "0.1", None),
-    ("far",             "Far",                    "float",   "1000", None),
-    ("normalization",   "Normalization",          "string",  "LINEAR",
-     ["LINEAR", "LOGARITHMIC", "RAW"]),
-    ("scalefactor",     "Scale Factor",           "float",   "1",   None),
-    ("invert",          "Invert",                 "toggle",  "1",   None),
-    ("brightness",      "Brightness",             "float",   "0",   None),
-    ("contrast",        "Contrast",               "float",   "0.2", None),
-    ("outputpath",      "Output Path",            "string",  "",    None),
-    ("format",          "Format",                 "string",  "PNG",
-     ["PNG", "TIFF", "EXR"]),
-    ("bitdepth",        "Bit Depth",              "string",  "16",
-     ["8", "16"]),
-    ("preview",         "Preview",                "toggle",  "0",   None),
-    ("animation",       "Animation",              "toggle",  "0",   None),
-    ("usescenerange",   "Use Scene Range",        "toggle",  "1",   None),
-    ("framestart",      "Frame Start",            "int",     "1",   None),
-    ("frameend",        "Frame End",              "int",     "250", None),
-    ("maskenabled",     "Mask Enabled",           "toggle",  "0",   None),
-    ("masksource",      "Mask Source",            "string",  "OBJECT_INDEX",
-     ["OBJECT_INDEX", "CRYPTOMATTE"]),
-    ("maskindex",       "Object Index",           "int",     "1",   None),
-    ("maskformat",      "Mask Format",            "string",  "GRAYSCALE",
-     ["GRAYSCALE", "RGBA"]),
-    ("maskoutputpath",  "Mask Output Path",       "string",  "",    None),
-]
+PARM_DEFS = generate_parm_defs()
 
 
 def has_explicit_parms(node) -> bool:
