@@ -10,10 +10,12 @@ Limbic Depth Map Renderer ports Blender Depth Map Generator v2.0 to Houdini. Two
 
 ### Build
 ```bash
-python3 build.py                          # build .otlc to ./HDAs/
-python3 build.py --out ./HDAs/custom.otlc # custom output path
-python3 build.py --install                # build + copy to ~/houdini18.0/otls/
-python3 build.py --verbose                # build with archive contents listing
+python3 build.py                          # generate Houdini build script to ./HDAs/build_hda.py
+# Then run inside Houdini's Python console:
+#   exec(open("HDAs/build_hda.py").read())
+#
+# Or install the pre-built HDA directly:
+#   hou.hda.installFile("HDAs/gero_depth_map_renderer.hda")
 ```
 
 ### Lint
@@ -21,8 +23,10 @@ No linter is configured. Use standard Python tooling:
 ```bash
 python3 -m py_compile python_panels/depth_map_panel.py  # syntax check
 python3 -m py_compile build.py
-python3 -m py_compile installer/install.py
-python3 -m py_compile config/shelf_actions.py
+python3 -m py_compile scripts/limbic_depth_map_core.py
+python3 -m py_compile scripts/settings_model.py
+python3 -m py_compile scripts/python_module.py
+python3 -m py_compile scripts/on_created.py
 ```
 
 ### Test
@@ -165,7 +169,7 @@ _save(node, settings)         # write back
 | File | Purpose |
 |---|---|
 | `python_panels/depth_map_panel.py` | Main module — depth + mask pipelines, Qt UI, operators |
-| `build.py` | `.otlc` HDA archive generator (tar + xz) |
+| `build.py` | HDA build script generator (requires Houdini to execute) |
 | `installer/install.py` | Houdini Textport install script |
 | `config/shelf_actions.py` | Shelf tool registration |
 | `README.md` | End-user documentation |
@@ -181,6 +185,7 @@ _save(node, settings)         # write back
 | `brightness` | `cop2::brightness` | `bright` | Additive brightness offset |
 | `contrast` | `cop2::contrast` | `contrast` | Multiplicative gain |
 | `scale` | `cop2::multiply` | `function` | Scale factor |
+| `invert` | — | `invert` | Depth inversion |
 | `grayscale` | `cop2::convert` | `mono` | RGBA → BW conversion |
 | `file_output` | `cop2::file_output` | `rop_image` | PNG/TIFF/EXR writer |
 | `viewer` | `cop2::viewer` | `output` | Display marker |

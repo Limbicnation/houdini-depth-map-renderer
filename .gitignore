@@ -49,6 +49,9 @@ Thumbs.db
 .idea/
 *.sublime-*
 
+# Generated build artifacts
+HDAs/build_hda.py
+
 # Git worktrees
 .worktrees/
 .kilo/
