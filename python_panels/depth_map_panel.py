@@ -1,8 +1,11 @@
-"""Limbic Depth Map Renderer — Python Panel UI.
-===============================================
+"""Depth Map Renderer (gero::depth_map_renderer) — Python Panel UI.
+==================================================================
 Thin Qt UI wrapper around the shared core module.
 Provides the user-facing panel; all pipeline logic lives in
 limbic_depth_map_core.py.
+
+COP2 backend only (H18+).  COP (H21+) backend is gated behind
+_ENABLE_COP_BACKEND and not yet active.
 
 Both pipelines are independent — mask does NOT require depth.
 """
@@ -173,7 +176,7 @@ class OpReset:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
-    """Create a limbic_depth_map_renderer COP network instance in /img.
+    """Create a gero::depth_map_renderer COP2 network instance in /img.
 
     - No hardcoded paths — uses hou.getenv() / hou.expandString().
     - Auto-creates /img container if missing.
@@ -211,16 +214,10 @@ def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
 
     try:
         with hou.undos.group("Spawn Depth Map HDA"):
-            node = None
-            for type_name in ("gero::depth_map_renderer",
-                              "limbic_depth_map_renderer"):
-                try:
-                    if hou.nodeType(f"Driver/cop/{type_name}") is not None:
-                        node = img.createNode(type_name, final_name)
-                        break
-                except Exception:
-                    pass
-            if node is None:
+            hda_type = hou.nodeType("Cop2/gero::depth_map_renderer")
+            if hda_type is not None:
+                node = img.createNode("gero::depth_map_renderer", final_name)
+            else:
                 node = img.createNode(_container_type(), final_name)
                 add_dm_settings_parm(node)
                 p = node.parm("dm_settings")
@@ -300,8 +297,7 @@ class DepthMapPanel:
         for n in img.children():
             try:
                 tname = n.type().name()
-                if tname in ("gero::depth_map_renderer",
-                             "limbic_depth_map_renderer"):
+                if tname == "gero::depth_map_renderer":
                     return n
                 if tname in {"copnet", "cop2net"} and (
                         n.parm("dm_settings") is not None
@@ -373,7 +369,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     # ═══ HDA Spawner ════════════════════════════════════════════════════════
     btn_spawn = QtWidgets.QPushButton("⊕  Spawn Depth Map HDA")
-    btn_spawn.setToolTip("Create a new limbic_depth_map_renderer node in /img")
+    btn_spawn.setToolTip("Create a new gero::depth_map_renderer node in /img")
     outer.addWidget(btn_spawn)
 
     # ═══ Depth Range ══════════════════════════════════════════════════════

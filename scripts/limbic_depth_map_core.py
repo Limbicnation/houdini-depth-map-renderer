@@ -1,9 +1,10 @@
-"""Limbic Depth Map Renderer — Shared Core.
-==========================================
+"""Depth Map Renderer (gero::depth_map_renderer) — Shared Core.
+=============================================================
 Pure pipeline logic shared between the HDA PythonModule and the
 Python Panel UI.  No Qt imports — only hou, os, json, math, sys.
 
-Dual COP backend: cop2 (H18-H20) / cop (H21+).
+COP2 backend only (H18+).  COP (H21+) backend is gated behind
+_ENABLE_COP_BACKEND and not yet active.
 
 Three-layer architecture:
     limbic_depth_map_core.py  (pure logic — this file)

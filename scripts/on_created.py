@@ -1,8 +1,7 @@
-"""Limbic Depth Map Renderer — HDA OnCreated Script.
-====================================================
+"""Depth Map Renderer (gero::depth_map_renderer) — HDA OnCreated Script.
+=======================================================================
 Runs when the HDA node is first placed in a network.
-Sets up the dm_settings parm, detects COP backend, and
-initialises default values.
+Sets up the dm_settings parm and initialises default values.
 """
 
 import os
@@ -34,7 +33,6 @@ if _core_dir not in sys.path:
 
 from limbic_depth_map_core import (  # noqa: E402
     add_dm_settings_parm,
-    DEFAULT_SETTINGS,
     backend,
     has_explicit_parms,
 )

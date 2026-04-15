@@ -26,7 +26,7 @@ SRC_ROOT = Path(__file__).parent.resolve()
 HDA_METADATA = {
     "name":            "depth_map_renderer",
     "namespace":       "gero",
-    "table":           "Driver/cop",
+    "table":           "Cop2",
     "label":           "Depth Map Renderer",
     "category":        "Limbicnation",
     "version":         (2, 1, 0),
@@ -162,7 +162,7 @@ def _generate_node_def() -> str:
 
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
-<source type="copnet">
+<source type="cop2net">
 <name>{hda_name}</name>
 <label>{hda_label}</label>
 <table>{hda_table}</table>

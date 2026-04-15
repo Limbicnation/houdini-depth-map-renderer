@@ -1,13 +1,14 @@
-"""Limbic Depth Map Renderer — HDA PythonModule.
-===============================================
+"""Depth Map Renderer (gero::depth_map_renderer) — HDA PythonModule.
+==================================================================
 Thin wrapper that imports from the shared core module.
-Embedded in the limbic_depth_map_renderer HDA.
+Embedded in the gero::depth_map_renderer HDA.
 
 This module enables direct HDA parameter-driven workflows
 (OnCreated, shelf tools, scripting) without requiring the
 Python Panel UI.
 
-Dual COP backend: cop2 (H18-H20) / cop (H21+).
+COP2 backend only (H18+).  COP (H21+) backend is gated behind
+_ENABLE_COP_BACKEND and not yet active.
 """
 
 import sys
