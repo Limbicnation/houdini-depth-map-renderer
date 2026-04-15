@@ -211,11 +211,16 @@ def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
 
     try:
         with hou.undos.group("Spawn Depth Map HDA"):
-            hda_type = hou.nodeType("Driver/cop/gero::depth_map_renderer")
-            if hda_type is not None:
-                node = img.createNode(
-                    "gero::depth_map_renderer", final_name)
-            else:
+            node = None
+            for type_name in ("gero::depth_map_renderer",
+                              "limbic_depth_map_renderer"):
+                try:
+                    if hou.nodeType(f"Driver/cop/{type_name}") is not None:
+                        node = img.createNode(type_name, final_name)
+                        break
+                except Exception:
+                    pass
+            if node is None:
                 node = img.createNode(_container_type(), final_name)
                 add_dm_settings_parm(node)
                 p = node.parm("dm_settings")
