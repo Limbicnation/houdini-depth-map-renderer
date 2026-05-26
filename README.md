@@ -11,10 +11,9 @@ A **Blender Depth Map Generator v2.0** → **Houdini** port. Mirrors the Limbicn
 | Blender concept | Houdini equivalent |
 |---|---|
 | Depth compositor (Z → MapRange → Bright/Contrast → ColorRamp → FileOut) | COP network: DM_Source → DM_RangeMap/DM_LOG → DM_Brightness → DM_Contrast → DM_Scale → DM_Grayscale → DM_FileOut |
-| Mask pipeline (IndexOB / Cryptomatte → IDMask → FileOut) | COP network: DM_MSource (IDToMask/Cryptomatte) → DM_MGrayscale/DM_MRGBA → DM_MaskFileOut |
+| Mask pipeline (IndexOB / Cryptomatte → IDMask → FileOut) | COP network: DM_MSource (IDToMask/Cryptomatte/SOP Import) → DM_MGrayscale/DM_MRGBA → DM_MaskFileOut |
 | Sidebar N-panel | Python Panel in the Composite Desk |
-| `scene.depth_map_settings` (PropertyGroup) | `dm_settings` parm (JSON on node) |
-| `setup_complete` / `mask_setup_complete` flags | `node.userData()` + settings dict |
+| `scene.depth_map_settings` (PropertyGroup) | Explicit HDA parameters + `dm_settings` hidden parm |
 
 ---
 
@@ -22,41 +21,62 @@ A **Blender Depth Map Generator v2.0** → **Houdini** port. Mirrors the Limbicn
 
 ```
 houdini-depth-map-renderer/
+├── scripts/
+│   ├── limbic_depth_map_core.py   # Shared core — all pipeline logic (no Qt)
+│   ├── python_module.py           # Thin HDA PythonModule wrapper
+│   └── on_created.py              # HDA OnCreated callback
 ├── python_panels/
-│   └── depth_map_panel.py      # Main plugin (v2.1 — dual COP backend)
+│   └── depth_map_panel.py         # Thin Qt UI wrapper (Python Panel)
 ├── installer/
-│   └── install.py              # Legacy Houdini Textport install
-├── install_fixed.py            # Modern installer (H21+ compatible)
+│   └── install.py                 # Legacy Houdini Textport installer
+├── install_fixed.py               # Modern installer (H21+ compatible)
 ├── config/
-│   └── shelf_actions.py        # Shelf tool registration
+│   └── shelf_actions.py           # Shelf tool registration
+├── build.py                       # Build .otlc HDA archive
+├── HDAs/                          # Generated HDA files
 ├── icons/
-├── build.py
 └── README.md
 ```
+
+### Three-Layer Architecture
+
+```
+limbic_depth_map_core.py   (pure pipeline logic — no Qt, no UI)
+├── python_module.py       (thin HDA PythonModule wrapper — for shelf/script use)
+└── depth_map_panel.py     (thin Qt UI wrapper — for Python Panel)
+```
+
+All shared logic lives in `limbic_depth_map_core.py`. Both the HDA and the Python Panel import from it, eliminating code duplication.
 
 ---
 
 ## Installation
 
-### Recommended (H21+)
+### Option A: HDA Install (Recommended)
+
+```bash
+python3 build.py --install
+```
+
+Then open Houdini → **File → Import → HDA File…** → select the `.otlc`.
+
+### Option B: Package Install
 
 ```bash
 python3 install_fixed.py
 ```
 
-Then restart Houdini. Or from the Houdini Python Shell:
+### Option C: Manual
 
-```python
-exec(open("/path/to/install_fixed.py").read())
-```
+Copy `python_panels/` → `~/houdiniXX.X/python_panels/`, restart Houdini.
 
-### Manual
-
-Copy `python_panels/depth_map_panel.py` → `~/houdini21.0/python_panels/`, restart Houdini.
+Set the `LIMBIC_DEPTH_MAP` environment variable to the repository root so shelf tools and import paths resolve correctly.
 
 ---
 
 ## Usage
+
+### Python Panel (UI)
 
 1. Open the **Composite Desk** (or any pane)
 2. **[+] New Pane Tab → Python Panel → Depth Map**
@@ -64,6 +84,13 @@ Copy `python_panels/depth_map_panel.py` → `~/houdini21.0/python_panels/`, rest
 4. Optionally enable **Mask Export** and set Object Index + path
 5. **Setup Mask Network** (independent of depth pipeline)
 6. Render with **Render Depth Map** / **Render Mask**, or as animation
+
+### HDA Node (Scripting)
+
+1. Create a COP network (e.g., `/img/depth_map1`)
+2. Drop the **Depth Map Renderer** HDA onto it
+3. Set parameters on the HDA node directly
+4. Use shelf tools or scripts to call Setup/Render/Reset
 
 ---
 
@@ -88,12 +115,14 @@ Copy `python_panels/depth_map_panel.py` → `~/houdini21.0/python_panels/`, rest
 | Setting | Description |
 |---|---|
 | Enable | Toggle mask pipeline |
-| Source | OBJECT_INDEX (Pass Index) or CRYPTOMATTE (Cycles) |
+| Source | OBJECT_INDEX (Pass Index) or CRYPTOMATTE |
 | Object Index | Set on object: Properties → Relations → Pass Index |
 | Format | GRAYSCALE (direct mask) or RGBA |
 | Mask Path | Output directory |
 
 **Mask integration with ComfyUI**: GRAYSCALE PNG outputs load directly as a mask node. Set Object Index on your character/prop, export mask, use it in ComfyUI ControlNet or as an alpha channel.
+
+**H21+ Object Index masks**: On Houdini 21+, the mask pipeline uses SOP Import → Rasterize Geometry instead of IDToMask (which requires an Object ID render pass). Set the SOP path on the generated `DM_MaskInput` node to point to your geometry.
 
 ---
 
@@ -101,16 +130,22 @@ Copy `python_panels/depth_map_panel.py` → `~/houdini21.0/python_panels/`, rest
 
 The plugin auto-detects the Houdini version and uses the correct node types:
 
-| Semantic | COP2 (H18–H20) | New COP (H21+) |
-|---|---|---|
-| Depth source | `cop2::deep` | `file` |
-| Range mapping | `cop2::range` | `remap` |
-| Brightness | `cop2::brightness` | `bright` |
-| Contrast | `cop2::contrast` | `contrast` |
-| Scale | `cop2::multiply` | `function` |
-| Grayscale | `cop2::convert` | `mono` |
-| File output | `cop2::file_output` | `rop_image` |
-| ID mask | `cop2::idtopmask` | `idtomask` |
+| Semantic | COP2 (H18–H20) | New COP (H21+) | Notes |
+|---|---|---|---|
+| Depth source | `cop2::file` | `file` | Set path to Z-depth EXR |
+| Range mapping | `cop2::range` | `remap` | Linear normalization |
+| Log normalize | `cop2::function` | `function` | LOGARITHMIC mode |
+| Brightness | `cop2::brightness` | `bright` | Additive offset |
+| Contrast | `cop2::contrast` | `contrast` | Gain (1 + contrast) |
+| Scale | `cop2::multiply` | `function` | Multiply mode, val1a parm |
+| Grayscale | `cop2::convert` | `mono` | RGBA → BW |
+| File output | `cop2::file_output` | `rop_image` | PNG/TIFF/EXR writer |
+| Viewer | `cop2::viewer` | `output` | Display marker |
+| ID mask | `cop2::idtomask` | `idtomask` | Object Index (COP2 only) |
+| Cryptomatte | `cop2::cryptomatte` | `cryptomatte` | Cryptomatte AOV reader |
+| RGBA convert | `cop2::convert` | `monotorgba` | Mono → RGBA |
+| SOP import | `cop2::file` | `sopimport` | H21+ mask source |
+| Rasterize | `cop2::rasterize` | `rasterizegeo` | H21+ mask from geometry |
 
 ### Depth Network
 ```
@@ -123,11 +158,71 @@ DM_Source (Z-depth input)
     → DM_FileOut (+ optional DM_Viewer)
 ```
 
-### Mask Network (independent)
+### Mask Network (independent — does NOT require depth)
+
+**COP2 (H18–H20):**
 ```
-DM_MSource (IDToMask / Cryptomatte)
-    → DM_MGrayscale  OR  DM_MRGBA_Convert (GRAYSCALE / RGBA)
+DM_MSource (IDToMask — set object_id parm)
+    → DM_MGrayscale / DM_MRGBA_Convert
     → DM_MaskFileOut
+```
+
+**New COP (H21+) — OBJECT_INDEX:**
+```
+DM_MaskInput (SOP Import — set soppath)
+    → DM_MSource (Rasterize Geometry)
+    → DM_MGrayscale / DM_MRGBA_Convert
+    → DM_MaskFileOut
+```
+
+**Both backends — CRYPTOMATTE:**
+```
+DM_MSource (Cryptomatte — requires EXR with Crypto AOV)
+    → DM_MGrayscale / DM_MRGBA_Convert
+    → DM_MaskFileOut
+```
+
+---
+
+## HDA Parameters
+
+The HDA exposes explicit parameters matching the Python Panel settings. These are also available for scripting via `hou.Node.parm()`:
+
+| Parm Name | Type | Settings Key |
+|---|---|---|
+| `usecustomrange` | Toggle | `use_custom_range` |
+| `near` | Float | `near` |
+| `far` | Float | `far` |
+| `normalization` | String (menu) | `normalization` |
+| `scalefactor` | Float | `scale_factor` |
+| `invert` | Toggle | `invert` |
+| `brightness` | Float | `brightness` |
+| `contrast` | Float | `contrast` |
+| `outputpath` | String | `output_path` |
+| `format` | String (menu) | `format` |
+| `bitdepth` | String (menu) | `bit_depth` |
+| `preview` | Toggle | `preview` |
+| `animation` | Toggle | `animation` |
+| `usescenerange` | Toggle | `use_scene_range` |
+| `framestart` | Integer | `frame_start` |
+| `frameend` | Integer | `frame_end` |
+| `maskenabled` | Toggle | `mask_enabled` |
+| `masksource` | String (menu) | `mask_source` |
+| `maskindex` | Integer | `mask_index` |
+| `maskformat` | String (menu) | `mask_format` |
+| `maskoutputpath` | String | `mask_output_path` |
+| `dm_settings` | String (hidden) | JSON tracking state |
+| `cop_backend` | String (hidden) | Auto-detected COP backend |
+
+---
+
+## Build
+
+```bash
+python3 build.py                          # build .otlc to ./HDAs/
+python3 build.py --out ./HDAs/custom.otlc # custom output path
+python3 build.py --install                # build + copy to ~/houdiniXX.X/otls/
+python3 build.py --verbose                # build with archive contents listing
 ```
 
 ---
@@ -135,9 +230,10 @@ DM_MSource (IDToMask / Cryptomatte)
 ## Uninstall
 
 ```bash
-rm ~/houdini21.0/python_panels/depth_map_panel.py
-rm ~/houdini21.0/python_panels/depth_map_panel.pypanel
-rm ~/houdini21.0/toolbar/limbic_depth_map_install.shelf
+rm ~/houdiniXX.X/python_panels/depth_map_panel.py
+rm ~/houdiniXX.X/python_panels/depth_map_panel.pypanel
+rm ~/houdiniXX.X/otls/limbic_depth_map_renderer.otlc
+rm ~/houdiniXX.X/packages/limbic_depth_map.json
 ```
 Restart Houdini.
 

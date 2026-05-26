@@ -52,7 +52,7 @@ def limbic_setup():
         if ok:
             hou.ui.setStatusMessage(
                 "Limbic Depth Map: network created",
-                severity=hou.severityType.Important)
+                severity=hou.severityType.ImportantMessage)
     except Exception as e:
         hou.ui.displayMessage(f"Setup failed:\n{e}", title="Error",
                               severity=hou.severityType.Error)
@@ -94,10 +94,49 @@ def limbic_reset():
                               severity=hou.severityType.Error)
 
 
+def limbic_spawn(node_name: str = "depth_map") -> None:
+    """Shelf action: spawn a Limbic Depth Map Renderer HDA in /img.
+
+    Usage — paste into a shelf tool script:
+        import sys
+        sys.path.insert(0, "/path/to/houdini-depth-map-renderer")
+        from config.shelf_actions import limbic_spawn
+        limbic_spawn()
+    """
+    import os
+
+    repo = os.environ.get(
+        "LIMBIC_DEPTH_MAP",
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    for p in (repo, os.path.join(repo, "scripts")):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    try:
+        from python_panels.depth_map_panel import spawn_hda
+        node = spawn_hda(node_name)
+        if node is not None:
+            try:
+                pane = hou.ui.paneTabOfType(hou.paneTabType.NetworkEditor)
+                if pane:
+                    pane.setCurrentNode(node)
+                    pane.frameSelection()
+            except Exception:
+                pass
+    except ImportError as e:
+        hou.ui.displayMessage(
+            f"Could not import spawn_hda:\n{e}\n\n"
+            f"Set LIMBIC_DEPTH_MAP env var to the plugin root.",
+            title="Depth Map Spawner",
+            severity=hou.severityType.Error,
+        )
+
+
 # ── Shelf registration ──────────────────────────────────────────────────────
 
 try:
-    shelf = hou.shelves.fetch("Limbic", create=True)
+    shelf = hou.shelves.fetch("Limbicnation", create=True)
 except Exception:
     shelf = None
 
@@ -120,6 +159,9 @@ if shelf is not None:
 
     ICON = "$LIMBIC_DEPTH_MAP/icons"
 
+    _add_tool("limbic_dm_spawn",  "⊕ Spawn",
+              f"{ICON}/depth_setup.svg", limbic_spawn,
+              "Spawn a new Depth Map HDA in /img")
     _add_tool("limbic_dm_setup",  "⚙ Setup",
               f"{ICON}/depth_setup.svg", limbic_setup,
               "Build the depth map network")

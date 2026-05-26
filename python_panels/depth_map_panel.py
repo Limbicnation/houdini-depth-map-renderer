@@ -1,440 +1,168 @@
-"""Limbic Depth Map Renderer — Python Panel UI.
-================================================
-Mirrors the Blender Depth Map Generator v2.0 workflow:
+"""DEPRECATED — Depth Map Renderer (gero::depth_map_renderer) — Python Panel UI.
+==============================================================================
+This Python Panel UI is DEPRECATED as of v2.1.0 and will be removed in v3.0.
 
-  Depth pipeline:  Z → LOG MapRange → Brightness → Contrast → Scale → Grayscale → FileOut
-  Mask pipeline:   IndexOB/Cryptomatte → IDMask → Grayscale/RGBA → FileOut
+The limbic_depth_map_renderer HDA now exposes all parameters directly
+on the node's parameter interface. Use the HDA's own parms instead of
+this panel. The shelf tools and HDA PythonModule have been updated to
+import from limbic_depth_map_core.py directly.
 
-Both pipelines are independent — mask does NOT require depth to be set up first.
+This file is kept only for backward compatibility with existing
+.pypanel registrations. It still works but will not receive new
+features (clipping, exposure, gamma, etc.).
+
+Migration:
+  - Replace panel-based workflows with HDA parameter-driven workflows
+  - Import from limbic_depth_map_core instead of depth_map_panel
+  - Shelf tools now import from core; no panel dependency needed
+
+COP2 backend only (H18+).  COP (H21+) backend is gated behind
+_ENABLE_COP_BACKEND and not yet active.
+
+Both pipelines are independent — mask does NOT require depth.
 """
 
-import os
 import json
-import math
+import os
 import sys
+
+
+def _find_core_dir() -> str:
+    """Locate the scripts/ directory containing limbic_depth_map_core.py.
+
+    Works in all execution contexts:
+      - Normal file import (__file__ is defined)
+      - Houdini .pypanel CDATA (__file__ is NOT defined)
+      - HDA PythonModule embedded script
+    """
+    # 1. Try __file__-based resolution (works for normal imports)
+    try:
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(this_dir, "..", "scripts")
+        if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+            return os.path.normpath(candidate)
+    except NameError:
+        pass
+
+    # 2. Try LIMBIC_DEPTH_MAP environment variable
+    limbic_root = os.environ.get("LIMBIC_DEPTH_MAP", "")
+    if limbic_root:
+        scripts_dir = os.path.join(limbic_root, "scripts")
+        if os.path.exists(os.path.join(scripts_dir, "limbic_depth_map_core.py")):
+            return scripts_dir
+
+    # 3. Try HOUDINI_PATH scan (requires hou, but we're in Houdini)
+    try:
+        import hou
+        for hp in hou.expandString("$HOUDINI_PATH").split(os.pathsep):
+            candidate = os.path.join(hp, "scripts")
+            if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+                return candidate
+    except Exception:
+        pass
+
+    # 4. Last resort: relative to CWD
+    candidate = os.path.join(os.getcwd(), "scripts")
+    if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
+        return candidate
+
+    return os.path.normpath(os.path.join(os.getcwd(), "scripts"))
+
+
+_core_dir = _find_core_dir()
+if _core_dir not in sys.path:
+    sys.path.insert(0, _core_dir)
 
 import hou
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────────────────────────────────────
+from limbic_depth_map_core import (  # noqa: E402
+    NODE_PREFIX,
+    HDA_CATEGORY,
+    DEFAULT_SETTINGS,
+    backend,
+    _container_type,
+    load_settings,
+    save_settings,
+    add_dm_settings_parm,
+    dm_children,
+    output_dir,
+    filename,
+    frame_range,
+    notify,
+    build_depth_network,
+    build_mask_network,
+    setup_depth,
+    render_depth,
+    reset_depth,
+    reset_backend_cache,
+)
+from settings_model import DepthMapSettings  # noqa: E402
 
-NODE_PREFIX  = "DM_"
-HDA_CATEGORY = "Limic"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# COP Backend Detection  (cop2 for H18-H20, cop for H21+)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_COP_BACKEND = None
-
-
-def _backend() -> str:
-    """Return 'cop' for H21+ (copnet), 'cop2' for legacy (cop2net)."""
-    global _COP_BACKEND
-    if _COP_BACKEND is None:
-        try:
-            # Primary: check if /img accepts copnet as a child type
-            img = hou.node("/img")
-            if img is not None:
-                child_types = img.childTypeCategory().nodeTypes()
-                if "copnet" in child_types:
-                    _COP_BACKEND = "cop"
-                elif "cop2net" in child_types:
-                    _COP_BACKEND = "cop2"
-                else:
-                    _COP_BACKEND = "cop" if hou.applicationVersion()[0] >= 21 else "cop2"
-            else:
-                # /img doesn't exist yet — fall back to version check
-                _COP_BACKEND = "cop" if hou.applicationVersion()[0] >= 21 else "cop2"
-        except Exception:
-            _COP_BACKEND = "cop2"
-    return _COP_BACKEND
-
-
-# Semantic key → {backend: houdini_type_string}
-_NODE_MAP = {
-    "source":       {"cop2": "cop2::deep",        "cop": "file"},
-    "log":          {"cop2": "cop2::ln",           "cop": "function"},  # function COP, parm func_math=3 (ln)
-    "range":        {"cop2": "cop2::range",        "cop": "remap"},
-    "brightness":   {"cop2": "cop2::brightness",   "cop": "bright"},
-    "contrast":     {"cop2": "cop2::contrast",     "cop": "contrast"},
-    "scale":        {"cop2": "cop2::multiply",     "cop": "function"},
-    "grayscale":    {"cop2": "cop2::convert",      "cop": "mono"},
-    "file_output":  {"cop2": "cop2::file_output",  "cop": "rop_image"},
-    "viewer":       {"cop2": "cop2::viewer",       "cop": "output"},
-    "idtomask":     {"cop2": "cop2::idtopmask",    "cop": "idtomask"},
-    "cryptomatte":  {"cop2": "cop2::cryptomatte",  "cop": "cryptomatte"},
-    "convert_rgba": {"cop2": "cop2::convert",      "cop": "monotorgba"},
-}
-
-
-def _create_node(parent: hou.Node, key: str, name: str) -> hou.Node:
-    """Create a COP node using the correct backend type."""
-    return parent.createNode(_NODE_MAP[key][_backend()], name)
-
-
-def _container_type() -> str:
-    """Return 'copnet' for H21+, 'cop2net' for legacy."""
-    return "copnet" if _backend() == "cop" else "cop2net"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Default settings  (mirrors Blender's DepthMapSettings PropertyGroup v2.0)
-# ─────────────────────────────────────────────────────────────────────────────
-
-DEFAULT_SETTINGS = {
-    # ── Setup tracking ──────────────────────────────────────────────────
-    "setup_complete":    False,
-    "mask_setup_complete": False,
-
-    # ── Depth range ──────────────────────────────────────────────────────
-    "use_custom_range":  False,
-    "near":              0.1,
-    "far":              1000.0,
-
-    # ── Depth normalization (v2.0) ───────────────────────────────────────
-    "normalization":     "LINEAR",   # LINEAR | LOGARITHMIC | RAW
-    "scale_factor":       1.0,       # applied before normalization
-    "invert":            True,       # far=0 (black), near=1 (white)
-
-    # ── Depth adjustments (v2.0) ─────────────────────────────────────────
-    "contrast":          0.2,        # gain = 1.0 + value
-    "brightness":        0.0,        # added before contrast
-
-    # ── Output ───────────────────────────────────────────────────────────
-    "output_path":      "",           # "" → $HIP/depth_maps/
-    "format":           "PNG",        # PNG | TIFF | EXR
-    "bit_depth":        "16",         # "8" | "16"
-    "preview":          False,        # add Viewer node alongside FileOut
-
-    # ── Animation ────────────────────────────────────────────────────────
-    "animation":         False,
-    "use_scene_range":   True,
-    "frame_start":       1,
-    "frame_end":        250,
-
-    # ── Mask export (v2.0 — mirrors Blender's mask pipeline) ─────────────
-    "mask_enabled":      False,
-    "mask_source":       "OBJECT_INDEX",   # OBJECT_INDEX | CRYPTOMATTE
-    "mask_index":        1,                # Object Pass Index (1-32767)
-    "mask_format":       "GRAYSCALE",       # GRAYSCALE | RGBA
-    "mask_output_path":  "",                # "" → $HIP/mask_maps/
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Settings helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _load(node: hou.Node) -> dict:
+# ── Houdini 21.0 UI Bug Workaround ─────────────────────────────────────────
+# H21+ new COP node types don't expose outputNames() the same way COP2 did.
+# This causes IndexError in nodegraphutils.py line 1281 when hovering wires:
+#   output_names[wire.outputIndex()] -> IndexError (empty tuple)
+# We monkey-patch getPromptWithNoHandler to catch and suppress this.
+# SideFX bug, cosmetic only — does not affect node functionality.
+def _patch_h21_wire_hover_bug():
     try:
-        raw = node.parm("dm_settings").eval()
-        if raw:
-            return {**DEFAULT_SETTINGS, **json.loads(raw)}
+        import hou
+        if hou.applicationVersion()[0] < 21:
+            return
     except Exception:
         pass
+    try:
+        from nodegraphutils import getPromptWithNoHandler as _orig
+        import nodegraphutils as _ngu
+        def _safe_get_prompt(uievent):
+            try:
+                return _orig(uievent)
+            except IndexError:
+                return ""
+        _ngu.getPromptWithNoHandler = _safe_get_prompt
+    except Exception:
+        pass
+
+_patch_h21_wire_hover_bug()
+
+_SETTINGS_STORE: dict[int, dict] = {}
+
+
+def _settings_key(node: hou.Node) -> int:
+    try:
+        return node.sessionId()
+    except Exception:
+        return hash(node.path())
+
+
+def _load(node: hou.Node) -> dict:
+    """Load settings — delegates to core load_settings(), falls back to store."""
+    try:
+        return load_settings(node)
+    except Exception:
+        pass
+    key = _settings_key(node)
+    if key in _SETTINGS_STORE:
+        return {**DEFAULT_SETTINGS, **_SETTINGS_STORE[key]}
     return {**DEFAULT_SETTINGS}
 
 
 def _save(node: hou.Node, settings: dict):
-    node.parm("dm_settings").set(json.dumps(settings))
-
-
-def _dm_children(node: hou.Node):
-    return [n for n in node.children() if n.name().startswith(NODE_PREFIX)]
-
-
-def _output_dir(settings: dict, key: str = "output_path",
-                fallback: str = "depth_maps") -> str:
-    path = settings.get(key, "").strip()
-    if not path:
-        path = hou.expandString(f"$HIP/{fallback}/")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def _filename(settings: dict, prefix: str, frame: int | None = None) -> str:
-    if frame is not None and settings.get("animation"):
-        fname = f"{prefix}_{frame:05d}"
-    else:
-        fname = prefix
-    ext = {"PNG": "png", "TIFF": "tiff", "EXR": "exr"}.get(settings.get("format", "PNG"), "png")
-    return f"{fname}.{ext}"
-
-
-def _frame_range(settings: dict):
-    if settings.get("use_scene_range", True):
-        r = hou.playbar.playbackRange()
-        return range(int(r[0]), int(r[1]) + 1)
-    return range(settings.get("frame_start", 1), settings.get("frame_end", 250) + 1)
-
-
-def _notify(node: hou.Node, severity: hou.severityType, msg: str):
+    """Save settings — delegates to core save_settings(), falls back to store."""
     try:
-        hou.ui.setStatusMessage(msg, severity=severity)
+        save_settings(node, settings)
+        return
     except Exception:
-        print(f"[{severity.name}] {msg}", file=sys.stderr)
+        pass
+    _SETTINGS_STORE[_settings_key(node)] = settings
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# COP network builders  (dual backend: cop2 for H18-H20, cop for H21+)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_depth_network(node: hou.Node, settings: dict):
-    """
-    Build the depth-map compositing pipeline.
-    Mirrors Blender's depth compositor exactly.
-
-    Pipeline (matches Blender v2.0):
-        DM_Source (Z from deep raster / file)
-            → DM_LOG (log normalize — optional)
-            → DM_RangeMap (range mapping — optional)
-            → DM_Brightness (additive brightness)
-            → DM_Contrast   (multiplicative gain)
-            → DM_Scale     (depth scale factor)
-            → DM_Grayscale (RGBA → BW)
-            → DM_FileOut / DM_Viewer (output + optional preview)
-
-    Supports both COP2 (H18-H20) and new COP (H21+) backends.
-    """
-    be = _backend()
-
-    for n in _dm_children(node):
-        if n.name().startswith(NODE_PREFIX + "M"):  # keep mask nodes
-            continue
-        node.destroyChild(n)
-
-    norm = settings.get("normalization", "LINEAR")
-    inv  = settings.get("invert", True)
-    near = settings.get("near", 0.1)
-    far  = settings.get("far",  1000.0)
-    sf   = settings.get("scale_factor", 1.0)
-
-    # ── 1. Z-Depth Source ─────────────────────────────────────────────────
-    src = _create_node(node, "source", NODE_PREFIX + "Source")
-    src.setLabel("Z-Depth Source")
-    src.setPosition(hou.Vector2(0, 0))
-
-    # ── 2. Depth Normalization ────────────────────────────────────────────
-    norm_steps = {"RAW": 0, "LINEAR": 1, "LOGARITHMIC": 2}
-    norm_node_count = norm_steps.get(norm, 1)
-    STEP = 200
-
-    if norm == "RAW":
-        normalize = src
-    elif norm == "LOGARITHMIC":
-        log_node = _create_node(node, "log", NODE_PREFIX + "LOG")
-        log_node.setLabel("Log Normalize")
-        log_node.setPosition(hou.Vector2(STEP, 0))
-        log_node.setInput(0, src, 0)
-        if be == "cop":
-            log_node.parm("func").set(1)        # math mode
-            log_node.parm("func_math").set(3)    # ln
-        else:
-            log_node.parm("affectalpha").set(False)
-
-        rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
-        rmap.setLabel("Log Range Mapper")
-        rmap.setPosition(hou.Vector2(STEP * 2, 0))
-        log_min = 0.0
-        log_max = math.log(max(far, 0.001))
-        if be == "cop":
-            rmap.parm("inputmin").set(log_min)
-            rmap.parm("inputmax").set(log_max)
-            rmap.parm("outputmin").set(1.0 if inv else 0.0)
-            rmap.parm("outputmax").set(0.0 if inv else 1.0)
-        else:
-            rmap.parm("from_min").set(log_min)
-            rmap.parm("from_max").set(log_max)
-            rmap.parm("to_min").set(1.0 if inv else 0.0)
-            rmap.parm("to_max").set(0.0 if inv else 1.0)
-        normalize = rmap
-        rmap.setInput(0, log_node, 0)
-    else:
-        rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
-        rmap.setLabel("Depth Range Mapper")
-        rmap.setPosition(hou.Vector2(STEP, 0))
-        if be == "cop":
-            rmap.parm("inputmin").set(near)
-            rmap.parm("inputmax").set(far)
-            rmap.parm("outputmin").set(1.0 if inv else 0.0)
-            rmap.parm("outputmax").set(0.0 if inv else 1.0)
-        else:
-            rmap.parm("from_min").set(near)
-            rmap.parm("from_max").set(far)
-            rmap.parm("to_min").set(1.0 if inv else 0.0)
-            rmap.parm("to_max").set(0.0 if inv else 1.0)
-        normalize = rmap
-
-    # ── 3. Brightness (v2.0) ─────────────────────────────────────────────
-    x = (norm_node_count + 1) * STEP
-    bright = _create_node(node, "brightness", NODE_PREFIX + "Brightness")
-    bright.setLabel("Brightness")
-    bright.setPosition(hou.Vector2(x, 0))
-    bright.parm("bright" if be == "cop" else "brightness").set(
-        settings.get("brightness", 0.0))
-    bright.setInput(0, normalize, 0)
-
-    # ── 4. Contrast (v2.0 — separate from brightness) ───────────────────
-    x += STEP
-    ctr = _create_node(node, "contrast", NODE_PREFIX + "Contrast")
-    ctr.setLabel("Depth Contrast")
-    ctr.setPosition(hou.Vector2(x, 0))
-    ctr.parm("contrast" if be == "cop" else "gain").set(
-        1.0 + settings.get("contrast", 0.2))
-    ctr.setInput(0, bright, 0)
-
-    # ── 5. Scale Factor (v2.0) ────────────────────────────────────────────
-    x += STEP
-    scale = _create_node(node, "scale", NODE_PREFIX + "Scale")
-    scale.setLabel("Depth Scale")
-    scale.setPosition(hou.Vector2(x, 0))
-    scale.parm("scale" if be == "cop" else "scale1").set(sf)
-    scale.setInput(0, ctr, 0)
-
-    # ── 6. Grayscale ──────────────────────────────────────────────────────
-    x += STEP
-    gray = _create_node(node, "grayscale", NODE_PREFIX + "Grayscale")
-    gray.setLabel("Grayscale Output")
-    gray.setPosition(hou.Vector2(x, 0))
-    if be == "cop2":
-        gray.parm("copoutput").set("bw")
-    gray.setInput(0, scale, 0)
-
-    # ── 7a. File Output ──────────────────────────────────────────────────
-    x += STEP
-    fout = _create_node(node, "file_output", NODE_PREFIX + "FileOut")
-    fout.setLabel("Depth File Output")
-    fout.setPosition(hou.Vector2(x, 0))
-    odir  = _output_dir(settings, "output_path", "depth_maps")
-    fname = _filename(settings, "depth_map")
-    if be == "cop":
-        fout.parm("coppath").set(gray.path())
-        fout.parm("copoutput").set(os.path.join(odir, fname))
-    else:
-        fout.parm("file").set(os.path.join(odir, fname))
-        fout.parm("filetype").set(settings.get("format", "PNG").lower())
-        fout.parm("bitdepth").set(settings.get("bit_depth", "16"))
-        fout.setInput(0, gray, 0)
-
-    # ── 7b. Viewer node (optional preview — v2.0) ────────────────────────
-    if settings.get("preview", False):
-        viewer = _create_node(node, "viewer", NODE_PREFIX + "Viewer")
-        viewer.setLabel("Depth Preview")
-        viewer.setPosition(hou.Vector2(x, 100))
-        if be == "cop2":
-            viewer.setInput(0, gray, 0)
-
-    display = gray if be == "cop" else fout
-    node.setDisplayNode(display)
-    node.layoutChildren()
-    return fout
-
-
-def build_mask_network(node: hou.Node, settings: dict):
-    """
-    Build the mask export compositing pipeline.
-    Independent of depth — can run without depth being set up.
-
-    Pipeline (matches Blender v2.0):
-        DM_MSource (IndexOB / Cryptomatte)
-            → DM_MRGBA_Convert or DM_MGrayscale
-            → DM_MaskFileOut
-
-    Supports both COP2 (H18-H20) and new COP (H21+) backends.
-    """
-    be = _backend()
-
-    for n in _dm_children(node):
-        if n.name().startswith(NODE_PREFIX + "M"):
-            node.destroyChild(n)
-
-    source = settings.get("mask_source", "OBJECT_INDEX")
-    mfmt   = settings.get("mask_format", "GRAYSCALE")
-    midx   = settings.get("mask_index", 1)
-
-    # ── 1. Mask Source ────────────────────────────────────────────────────
-    if source == "CRYPTOMATTE":
-        mask_src = _create_node(node, "cryptomatte", NODE_PREFIX + "MSource")
-        mask_src.setLabel("Cryptomatte Source")
-    else:
-        mask_src = _create_node(node, "idtomask", NODE_PREFIX + "MSource")
-        mask_src.setLabel("Object Index Mask")
-        if be == "cop":
-            mask_src.parm("enablerange").set(True)
-            mask_src.parm("start").set(midx)
-            mask_src.parm("end").set(midx)
-        else:
-            mask_src.parm("object_id").set(midx)
-
-    mask_src.setPosition(hou.Vector2(0, -300))
-
-    # ── 2. Output format ──────────────────────────────────────────────────
-    if mfmt == "RGBA":
-        convert_ = _create_node(node, "convert_rgba", NODE_PREFIX + "MRGBA_Convert")
-        convert_.setLabel("RGBA Convert")
-        convert_.setPosition(hou.Vector2(300, -300))
-        if be == "cop2":
-            convert_.parm("copoutput").set("rgba")
-        convert_.setInput(0, mask_src, 0)
-        mask_out = convert_
-    else:
-        mask_out = _create_node(node, "grayscale", NODE_PREFIX + "MGrayscale")
-        mask_out.setLabel("Grayscale Mask")
-        mask_out.setPosition(hou.Vector2(300, -300))
-        if be == "cop2":
-            mask_out.parm("copoutput").set("bw")
-        mask_out.setInput(0, mask_src, 0)
-
-    # ── 3. File Output ────────────────────────────────────────────────────
-    mfout = _create_node(node, "file_output", NODE_PREFIX + "MaskFileOut")
-    mfout.setLabel("Mask File Output")
-    mfout.setPosition(hou.Vector2(600, -300))
-
-    odir  = _output_dir(settings, "mask_output_path", "mask_maps")
-    fname = _filename(settings, "mask_map")
-    if be == "cop":
-        mfout.parm("coppath").set(mask_out.path())
-        mfout.parm("copoutput").set(os.path.join(odir, fname))
-    else:
-        mfout.parm("file").set(os.path.join(odir, fname))
-        mfout.parm("filetype").set("png")
-        mfout.parm("bitdepth").set(settings.get("bit_depth", "16"))
-        mfout.setInput(0, mask_out, 0)
-
-    display = mask_out if be == "cop" else mfout
-    node.setDisplayNode(display)
-    node.layoutChildren()
-    return mfout
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Operators
-# ─────────────────────────────────────────────────────────────────────────────
 
 class OpSetup:
     script_label = "limbic.setup_depth_map"
 
     @staticmethod
     def execute(node: hou.Node, mask_only: bool = False) -> bool:
-        settings = _load(node)
-        try:
-            if mask_only:
-                build_mask_network(node, settings)
-                settings["mask_setup_complete"] = True
-            else:
-                build_depth_network(node, settings)
-                settings["setup_complete"] = True
-            _save(node, settings)
-            mode = "Mask" if mask_only else "Depth"
-            _notify(node, hou.severityType.Important,
-                    f"Depth Map: {mode} network created")
-            return True
-        except Exception as e:
-            _notify(node, hou.severityType.Error,
-                    f"Setup failed: {e}")
-            return False
+        return setup_depth(node, mask_only=mask_only)
 
 
 class OpRender:
@@ -442,55 +170,8 @@ class OpRender:
 
     @staticmethod
     def execute(node: hou.Node, animation: bool = False,
-               mask: bool = False) -> bool:
-        try:
-            settings = _load(node)
-            settings["animation"] = animation
-            _save(node, settings)
-
-            prefix = "Mask" if mask else "depth"
-            complete_key = "mask_setup_complete" if mask else "setup_complete"
-
-            if not settings.get(complete_key, False):
-                if not OpSetup.execute(node, mask_only=mask):
-                    return False
-
-            fout = node.node(NODE_PREFIX +
-                             ("MaskFileOut" if mask else "FileOut"))
-            if not fout:
-                _notify(node, hou.severityType.Error,
-                        f"Depth Map: output node not found — re-run Setup")
-                return False
-
-            frames = list(_frame_range(settings)) if animation else [hou.frame()]
-            if animation:
-                _notify(node, hou.severityType.Important,
-                        f"Depth Map: rendering {len(frames)} {prefix} frames…")
-
-            be = _backend()
-            odir = _output_dir(settings,
-                                "mask_output_path" if mask else "output_path",
-                                "mask_maps" if mask else "depth_maps")
-            for frame in frames:
-                hou.setFrame(frame)
-                fname = _filename(settings,
-                                   "mask_map" if mask else "depth_map",
-                                   frame=frame)
-                if be == "cop":
-                    fout.parm("copoutput").set(os.path.join(odir, fname))
-                    fout.render()
-                else:
-                    fout.parm("file").set(os.path.join(odir, fname))
-                    fout.cook(force=True)
-
-            _notify(node, hou.severityType.Important,
-                    f"Depth Map: rendered {len(frames)} {prefix} frame(s) → {odir}")
-            return True
-
-        except Exception as e:
-            _notify(node, hou.severityType.Error,
-                    f"Render failed: {e}")
-            return False
+                mask: bool = False) -> bool:
+        return render_depth(node, animation=animation, mask=mask)
 
 
 class OpReset:
@@ -498,31 +179,84 @@ class OpReset:
 
     @staticmethod
     def execute(node: hou.Node, mask_only: bool = False) -> bool:
+        return reset_depth(node, mask_only=mask_only)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HDA Spawner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
+    """Create a gero::depth_map_renderer COP2 network instance in /img.
+
+    - No hardcoded paths — uses hou.getenv() / hou.expandString().
+    - Auto-creates /img container if missing.
+    - Auto-increments name on collision (depth_map1, depth_map2, ...).
+    - Wrapped in undo group.
+    - Returns the created hou.Node, or None on failure.
+    """
+    img = hou.node("/img")
+    if img is None:
         try:
-            for n in _dm_children(node):
-                if mask_only and not n.name().startswith(NODE_PREFIX + "M"):
-                    continue
-                node.destroyChild(n)
-
-            settings = _load(node)
-            if mask_only:
-                settings["mask_setup_complete"] = False
-            else:
-                settings["setup_complete"] = False
-            _save(node, settings)
-
-            _notify(node, hou.severityType.Important,
-                    "Depth Map: network reset")
-            return True
+            img = hou.node("/obj").createNode("img", "img")
+            img.moveToGoodPosition()
         except Exception as e:
-            _notify(node, hou.severityType.Error,
-                    f"Reset failed: {e}")
-            return False
+            print(f"[Limbic Depth Map] Could not create /img context: {e}",
+                  file=sys.stderr)
+            try:
+                hou.ui.displayMessage(
+                    f"Could not create /img context:\n{e}",
+                    title="Depth Map Spawner",
+                    severity=hou.severityType.Error,
+                )
+            except Exception:
+                pass
+            return None
 
+    base = node_name
+    if base[-1:].isdigit():
+        while base and base[-1].isdigit():
+            base = base[:-1]
+        base = base or "depth_map"
+    counter = 1
+    while img.node(f"{base}{counter}") is not None:
+        counter += 1
+    final_name = f"{base}{counter}"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Python Panel Interface (Qt UI — mirrors Blender's sidebar)
-# ─────────────────────────────────────────────────────────────────────────────
+    try:
+        with hou.undos.group("Spawn Depth Map HDA"):
+            hda_type = hou.nodeType("Cop2/gero::depth_map_renderer")
+            if hda_type is not None:
+                node = img.createNode("gero::depth_map_renderer", final_name)
+            else:
+                node = img.createNode(_container_type(), final_name)
+                add_dm_settings_parm(node)
+                p = node.parm("dm_settings")
+                if p is not None:
+                    p.set(json.dumps({
+                        "setup_complete": False,
+                        "mask_setup_complete": False,
+                    }))
+            node.moveToGoodPosition()
+            node.setSelected(True, clear_all_selected=True)
+        hou.ui.setStatusMessage(
+            f"Depth Map: spawned '{final_name}' in /img",
+            severity=hou.severityType.ImportantMessage,
+        )
+        return node
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        try:
+            hou.ui.displayMessage(
+                f"Spawn failed:\n{e}",
+                title="Depth Map Spawner",
+                severity=hou.severityType.Error,
+            )
+        except Exception:
+            pass
+        return None
 
 class DepthMapPanel:
 
@@ -534,6 +268,14 @@ class DepthMapPanel:
                 self._ensure_parm()
         except Exception:
             self.node = None
+
+    def __del__(self):
+        """Clean up _SETTINGS_STORE entries when panel is destroyed."""
+        try:
+            if self.node is not None:
+                _SETTINGS_STORE.pop(_settings_key(self.node), None)
+        except Exception:
+            pass
 
     def _resolve_node(self):
         try:
@@ -553,25 +295,28 @@ class DepthMapPanel:
     def onRevive(self):
         self.node = self._resolve_node()
         self._ensure_parm()
+        reset_backend_cache()
 
     def onActiveNodeChanged(self, kwargs):
         self.node = kwargs.get("active_node", None)
         self._ensure_parm()
 
     def _find_hda(self):
-        container_types = {"copnet", "cop2net"}
-        for root in [hou.node("/obj"), hou.node("/img")]:
-            if root is None:
-                continue
-            for n in root.allSubChildren():
-                try:
-                    tname = n.type().name()
-                    if tname == "limbic_depth_map_renderer":
-                        return n
-                    if tname in container_types and n.parm("dm_settings") is not None:
-                        return n
-                except Exception:
-                    pass
+        # Scoped to /img only — avoids O(n) allSubChildren() on heavy scenes
+        img = hou.node("/img")
+        if img is None:
+            return None
+        for n in img.children():
+            try:
+                tname = n.type().name()
+                if tname == "gero::depth_map_renderer":
+                    return n
+                if tname in {"copnet", "cop2net"} and (
+                        n.parm("dm_settings") is not None
+                        or _settings_key(n) in _SETTINGS_STORE):
+                    return n
+            except Exception:
+                pass
         return None
 
     def _ensure_node(self):
@@ -591,8 +336,8 @@ class DepthMapPanel:
             self.node = net
             self._ensure_parm()
             return True
-        except hou.OperationFailed as e:
-            be = _backend()
+        except Exception as e:
+            be = backend()
             ctype = _container_type()
             ver = hou.applicationVersionString()
             hou.ui.displayMessage(
@@ -604,18 +349,20 @@ class DepthMapPanel:
     def _ensure_parm(self):
         if self.node is None:
             return
-        try:
-            if self.node.parm("dm_settings") is None:
-                pg = self.node.parmTemplateGroup()
-                pg.addParmTemplate(hou.StringParmTemplate(
-                    "dm_settings", "", 1,
-                    default_value=json.dumps(DEFAULT_SETTINGS), hide=True))
-                self.node.setParmTemplateGroup(pg)
-        except Exception:
-            pass
+        if self.node.parm("dm_settings") is None:
+            add_dm_settings_parm(self.node)
 
     def _current_settings(self) -> dict:
         return _load(self.node) if self.node else {**DEFAULT_SETTINGS}
+
+    def _refresh_node(self):
+        try:
+            resolved = self._resolve_node()
+            if resolved is not None:
+                self.node = resolved
+                self._ensure_parm()
+        except Exception:
+            pass
 
     def _save(self, settings: dict):
         if self.node:
@@ -632,9 +379,12 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
     outer.setContentsMargins(8, 8, 8, 8)
     outer.setSpacing(4)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SECTION 1 — Depth Range
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══ HDA Spawner ════════════════════════════════════════════════════════
+    btn_spawn = QtWidgets.QPushButton("⊕  Spawn Depth Map HDA")
+    btn_spawn.setToolTip("Create a new gero::depth_map_renderer node in /img")
+    outer.addWidget(btn_spawn)
+
+    # ═══ Depth Range ══════════════════════════════════════════════════════
     depth_grp = QtWidgets.QGroupBox("Depth Range")
     depth_layout = QtWidgets.QFormLayout(depth_grp)
     depth_layout.setSpacing(4)
@@ -664,9 +414,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     outer.addWidget(depth_grp)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SECTION 2 — Depth Adjustments (v2.0)
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══ Depth Adjustments ════════════════════════════════════════════════
     adj_grp = QtWidgets.QGroupBox("Depth Adjustments")
     adj_layout = QtWidgets.QFormLayout(adj_grp)
     adj_layout.setSpacing(4)
@@ -691,9 +439,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     outer.addWidget(adj_grp)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SECTION 3 — Output
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══ Output ══════════════════════════════════════════════════════════
     out_grp = QtWidgets.QGroupBox("Output")
     out_layout = QtWidgets.QFormLayout(out_grp)
     out_layout.setSpacing(4)
@@ -715,9 +461,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     outer.addWidget(out_grp)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SECTION 4 — Animation
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══ Animation ════════════════════════════════════════════════════════
     anim_grp = QtWidgets.QGroupBox("Animation")
     anim_layout = QtWidgets.QFormLayout(anim_grp)
     anim_layout.setSpacing(4)
@@ -740,9 +484,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     outer.addWidget(anim_grp)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SECTION 5 — Mask Export (v2.0 — independent pipeline)
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══ Mask Export ══════════════════════════════════════════════════════
     mask_grp = QtWidgets.QGroupBox("Mask Export (ComfyUI)")
     mask_layout = QtWidgets.QFormLayout(mask_grp)
     mask_layout.setSpacing(4)
@@ -773,9 +515,7 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     outer.addWidget(mask_grp)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # ACTION BUTTONS
-    # ═══════════════════════════════════════════════════════════════════
+    # ═══ Action Buttons ═════════════════════════════════════════════════
     btn_setup   = QtWidgets.QPushButton("⚙  Setup Depth Network")
     btn_render  = QtWidgets.QPushButton("▶  Render Depth Map")
     btn_anim    = QtWidgets.QPushButton("▶▶  Render Depth Animation")
@@ -806,108 +546,226 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
 
     outer.addStretch(1)
 
-    # ── Wire signals ────────────────────────────────────────────────────────
-
     def _collect() -> dict:
-        return {
-            "use_custom_range":  cb_custom.isChecked(),
-            "near":              spin_near.value(),
-            "far":               spin_far.value(),
-            "normalization":     combo_norm.currentText(),
-            "invert":            cb_inv.isChecked(),
-            "scale_factor":      spin_scale.value(),
-            "brightness":        slider_bright.value() / 100.0,
-            "contrast":         slider_ctr.value() / 100.0,
-            "output_path":       edit_path.text().strip(),
-            "format":            combo_fmt.currentText(),
-            "bit_depth":        "16" if combo_bits.currentText() == "16-bit" else "8",
-            "preview":           cb_preview.isChecked(),
-            "animation":         cb_anim.isChecked(),
-            "use_scene_range":   cb_scene.isChecked(),
-            "frame_start":       spin_start.value(),
-            "frame_end":         spin_end.value(),
-            "mask_enabled":       cb_mask_on.isChecked(),
-            "mask_source":       combo_mask_src.currentText(),
-            "mask_index":        spin_midx.value(),
-            "mask_format":       combo_mask_fmt.currentText(),
-            "mask_output_path":  edit_mask_path.text().strip(),
-        }
+        near_val = spin_near.value()
+        far_val = spin_far.value()
+        scale_val = spin_scale.value()
+        if cb_custom.isChecked() and near_val >= far_val:
+            hou.ui.displayMessage(
+                f"Near ({near_val:.3f}) must be less than Far ({far_val:.3f}).",
+                title="Depth Map — Validation",
+                severity=hou.severityType.Warning,
+            )
+            far_val = near_val + 1.0
+            spin_far.setValue(far_val)
+        if scale_val == 0.0:
+            hou.ui.displayMessage(
+                "Scale Factor cannot be zero — reset to 1.0.",
+                title="Depth Map — Validation",
+                severity=hou.severityType.Warning,
+            )
+            scale_val = 1.0
+            spin_scale.setValue(scale_val)
+        s = DepthMapSettings(
+            use_custom_range=cb_custom.isChecked(),
+            near=near_val,
+            far=far_val,
+            normalization=combo_norm.currentText(),
+            invert=cb_inv.isChecked(),
+            scale_factor=scale_val,
+            brightness=slider_bright.value() / 100.0,
+            contrast=slider_ctr.value() / 100.0,
+            output_path=edit_path.text().strip(),
+            format=combo_fmt.currentText(),
+            bit_depth="16" if combo_bits.currentText() == "16-bit" else "8",
+            preview=cb_preview.isChecked(),
+            animation=cb_anim.isChecked(),
+            use_scene_range=cb_scene.isChecked(),
+            frame_start=spin_start.value(),
+            frame_end=spin_end.value(),
+            mask_enabled=cb_mask_on.isChecked(),
+            mask_source=combo_mask_src.currentText(),
+            mask_index=spin_midx.value(),
+            mask_format=combo_mask_fmt.currentText(),
+            mask_output_path=edit_mask_path.text().strip(),
+        )
+        return s.to_dict()
 
-    def _load():
-        s = panel._current_settings()
-        cb_custom.setChecked(s.get("use_custom_range", False))
-        spin_near.setValue(s.get("near", 0.1))
-        spin_far.setValue(s.get("far", 1000.0))
-        combo_norm.setCurrentText(s.get("normalization", "LINEAR"))
-        cb_inv.setChecked(s.get("invert", True))
-        spin_scale.setValue(s.get("scale_factor", 1.0))
-        slider_bright.setValue(int(s.get("brightness", 0.0) * 100))
-        lbl_bright.setText(f"{s.get('brightness', 0.0):.2f}")
-        slider_ctr.setValue(int(s.get("contrast", 0.2) * 100))
-        lbl_ctr.setText(f"{s.get('contrast', 0.2):.2f}")
-        edit_path.setText(s.get("output_path", ""))
-        combo_fmt.setCurrentText(s.get("format", "PNG"))
+    def _load_ui():
+        s = DepthMapSettings.from_dict(panel._current_settings())
+        cb_custom.setChecked(s.use_custom_range)
+        spin_near.setValue(s.near)
+        spin_far.setValue(s.far)
+        combo_norm.setCurrentText(s.normalization)
+        cb_inv.setChecked(s.invert)
+        spin_scale.setValue(s.scale_factor)
+        slider_bright.setValue(int(s.brightness * 100))
+        lbl_bright.setText(f"{s.brightness:.2f}")
+        slider_ctr.setValue(int(s.contrast * 100))
+        lbl_ctr.setText(f"{s.contrast:.2f}")
+        edit_path.setText(s.output_path)
+        combo_fmt.setCurrentText(s.format)
         combo_bits.setCurrentText(
-            "16-bit" if s.get("bit_depth") == "16" else "8-bit")
-        cb_preview.setChecked(s.get("preview", False))
-        cb_anim.setChecked(s.get("animation", False))
-        cb_scene.setChecked(s.get("use_scene_range", True))
-        spin_start.setValue(s.get("frame_start", 1))
-        spin_end.setValue(s.get("frame_end", 250))
-        cb_mask_on.setChecked(s.get("mask_enabled", False))
-        combo_mask_src.setCurrentText(s.get("mask_source", "OBJECT_INDEX"))
-        spin_midx.setValue(s.get("mask_index", 1))
-        combo_mask_fmt.setCurrentText(s.get("mask_format", "GRAYSCALE"))
-        edit_mask_path.setText(s.get("mask_output_path", ""))
+            "16-bit" if s.bit_depth == "16" else "8-bit")
+        cb_preview.setChecked(s.preview)
+        cb_anim.setChecked(s.animation)
+        cb_scene.setChecked(s.use_scene_range)
+        spin_start.setValue(s.frame_start)
+        spin_end.setValue(s.frame_end)
+        cb_mask_on.setChecked(s.mask_enabled)
+        combo_mask_src.setCurrentText(s.mask_source)
+        spin_midx.setValue(s.mask_index)
+        combo_mask_fmt.setCurrentText(s.mask_format)
+        edit_mask_path.setText(s.mask_output_path)
 
     def _on_setup():
-        s = _collect()
-        if panel._ensure_node():
-            panel._save(s)
-            OpSetup.execute(panel.node, mask_only=False)
+        try:
+            s = _collect()
+            panel._refresh_node()
+            if panel._ensure_node():
+                panel._save(s)
+                with hou.undos.group("Depth Map: Setup Depth Network"):
+                    OpSetup.execute(panel.node, mask_only=False)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network found. Open a Compositor pane and try again.",
+                    title="Depth Map", severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Setup failed:\n{e}", title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_render():
-        s = _collect()
-        s["animation"] = False
-        if panel._ensure_node():
-            panel._save(s)
-            OpRender.execute(panel.node, animation=False, mask=False)
+        try:
+            s = _collect()
+            s["animation"] = False
+            panel._refresh_node()
+            if panel._ensure_node():
+                panel._save(s)
+                with hou.undos.group("Depth Map: Render Depth Map"):
+                    OpRender.execute(panel.node, animation=False, mask=False)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network found. Run Setup first.",
+                    title="Depth Map", severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Render failed:\n{e}", title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_anim():
-        s = _collect()
-        s["animation"] = True
-        if panel._ensure_node():
-            panel._save(s)
-            OpRender.execute(panel.node, animation=True, mask=False)
+        try:
+            s = _collect()
+            s["animation"] = True
+            panel._refresh_node()
+            if panel._ensure_node():
+                panel._save(s)
+                with hou.undos.group("Depth Map: Render Depth Animation"):
+                    OpRender.execute(panel.node, animation=True, mask=False)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network found. Run Setup first.",
+                    title="Depth Map", severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Animation render failed:\n{e}",
+                                  title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_reset():
-        if panel._ensure_node():
-            OpReset.execute(panel.node, mask_only=False)
+        try:
+            panel._refresh_node()
+            if panel._ensure_node():
+                with hou.undos.group("Depth Map: Reset Depth Map"):
+                    OpReset.execute(panel.node, mask_only=False)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network to reset.", title="Depth Map",
+                    severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Reset failed:\n{e}", title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_mask_setup():
-        s = _collect()
-        if panel._ensure_node():
-            panel._save(s)
-            OpSetup.execute(panel.node, mask_only=True)
+        try:
+            s = _collect()
+            panel._refresh_node()
+            if panel._ensure_node():
+                panel._save(s)
+                with hou.undos.group("Depth Map: Setup Mask Network"):
+                    OpSetup.execute(panel.node, mask_only=True)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network found. Open a Compositor pane and try again.",
+                    title="Depth Map", severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Mask setup failed:\n{e}",
+                                  title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_mask_render():
-        s = _collect()
-        s["animation"] = False
-        if panel._ensure_node():
-            panel._save(s)
-            OpRender.execute(panel.node, animation=False, mask=True)
+        try:
+            s = _collect()
+            s["animation"] = False
+            panel._refresh_node()
+            if panel._ensure_node():
+                panel._save(s)
+                with hou.undos.group("Depth Map: Render Mask"):
+                    OpRender.execute(panel.node, animation=False, mask=True)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network found. Run Mask Setup first.",
+                    title="Depth Map", severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Mask render failed:\n{e}",
+                                  title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_mask_anim():
-        s = _collect()
-        s["animation"] = True
-        if panel._ensure_node():
-            panel._save(s)
-            OpRender.execute(panel.node, animation=True, mask=True)
+        try:
+            s = _collect()
+            s["animation"] = True
+            panel._refresh_node()
+            if panel._ensure_node():
+                panel._save(s)
+                with hou.undos.group("Depth Map: Render Mask Animation"):
+                    OpRender.execute(panel.node, animation=True, mask=True)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network found. Run Mask Setup first.",
+                    title="Depth Map", severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Mask animation failed:\n{e}",
+                                  title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
     def _on_mask_reset():
-        if panel._ensure_node():
-            OpReset.execute(panel.node, mask_only=True)
+        try:
+            panel._refresh_node()
+            if panel._ensure_node():
+                with hou.undos.group("Depth Map: Reset Mask"):
+                    OpReset.execute(panel.node, mask_only=True)
+            else:
+                hou.ui.displayMessage(
+                    "No COP network to reset.", title="Depth Map",
+                    severity=hou.severityType.Warning)
+        except Exception as e:
+            hou.ui.displayMessage(f"Mask reset failed:\n{e}",
+                                  title="Depth Map Error",
+                                  severity=hou.severityType.Error)
 
+    def _on_spawn():
+        try:
+            new_node = spawn_hda()
+            if new_node is not None:
+                panel.node = new_node
+                panel._ensure_parm()
+                _load_ui()
+        except Exception as e:
+            hou.ui.displayMessage(
+                f"Spawn failed:\n{e}",
+                title="Depth Map Error",
+                severity=hou.severityType.Error,
+            )
+
+    btn_spawn.clicked.connect(_on_spawn)
     btn_setup.clicked.connect(_on_setup)
     btn_render.clicked.connect(_on_render)
     btn_anim.clicked.connect(_on_anim)
@@ -917,12 +775,8 @@ def _build_ui(panel: DepthMapPanel, parent, QtWidgets, QtCore):
     mask_btn_anim.clicked.connect(_on_mask_anim)
     mask_btn_reset.clicked.connect(_on_mask_reset)
 
-    _load()
+    _load_ui()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Module registration
-# ─────────────────────────────────────────────────────────────────────────────
 
 def register_operators():
     pass
