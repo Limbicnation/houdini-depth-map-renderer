@@ -52,6 +52,9 @@ Thumbs.db
 # Generated build artifacts
 HDAs/build_hda.py
 
+# MCP notes
+mcp_defaults.txt
+
 # Git worktrees
 .worktrees/
 .kilo/

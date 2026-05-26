@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a1a1a"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg)" rx="128"/>
+
+  <!-- Outer ring -->
+  <circle cx="512" cy="512" r="420" fill="none" stroke="#ffffff" stroke-width="24" opacity="0.25"/>
+  <!-- Ring 2 -->
+  <circle cx="512" cy="512" r="340" fill="none" stroke="#ffffff" stroke-width="28" opacity="0.4"/>
+  <!-- Ring 3 -->
+  <circle cx="512" cy="512" r="260" fill="none" stroke="#ffffff" stroke-width="32" opacity="0.55"/>
+  <!-- Ring 4 -->
+  <circle cx="512" cy="512" r="180" fill="none" stroke="#ffffff" stroke-width="36" opacity="0.7"/>
+  <!-- Ring 5 -->
+  <circle cx="512" cy="512" r="100" fill="none" stroke="#ffffff" stroke-width="8"/>
+
+  <!-- Inner center -->
+  <circle cx="512" cy="512" r="40" fill="#ffffff" opacity="0.9"/>
+</svg>
