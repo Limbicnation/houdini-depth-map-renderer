@@ -7,7 +7,6 @@ Replaces DEFAULT_SETTINGS, _PARM_MAP, PARM_DEFS, _collect(), _load_ui() duplicat
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
-from typing import get_args, get_origin
 
 
 def _menu_for(field_name: str) -> list[str] | None:
@@ -28,6 +27,13 @@ class DepthMapSettings:
     invert: bool = True
     contrast: float = 0.2
     brightness: float = 0.0
+    clip_enable: bool = False
+    near_clip: float = 0.01
+    far_clip: float = 100.0
+    exposure: float = 0.0
+    gamma: float = 1.0
+    black_point: float = 0.0
+    white_point: float = 1.0
     output_path: str = ""
     format: str = "PNG"
     bit_depth: str = "16"
@@ -50,6 +56,15 @@ class DepthMapSettings:
                 f"far ({self.far}) must be > near ({self.near})")
         if self.scale_factor == 0.0:
             raise ValueError("scale_factor cannot be zero")
+        if self.clip_enable and self.near_clip >= self.far_clip:
+            raise ValueError(
+                f"far_clip ({self.far_clip}) must be > near_clip ({self.near_clip})")
+        if self.gamma <= 0.0:
+            raise ValueError("gamma must be > 0")
+        if not (0.0 <= self.black_point < self.white_point <= 1.0):
+            raise ValueError(
+                "black_point must be in [0,1), white_point in (0,1], "
+                "and black_point < white_point")
 
     def to_dict(self) -> dict:
         return asdict(self)

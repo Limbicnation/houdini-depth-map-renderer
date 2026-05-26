@@ -29,7 +29,7 @@ SRC_ROOT = Path(__file__).parent.resolve()
 HDA_METADATA = {
     "name":            "depth_map_renderer",
     "namespace":       "gero",
-    "table":           "Object",
+    "table":           "Cop2",
     "label":           "Depth Map Renderer",
     "category":        "Limbicnation",
     "version":         (2, 1, 0),
@@ -118,17 +118,22 @@ SCRIPTS = {scripts_json}
 
 
 def build_hda():
-    obj = hou.node("/obj")
+    img = hou.node("/img")
+    if img is None:
+        img = hou.node("/obj").createNode("img", "img")
 
-    # Remove existing instances
-    for n in list(obj.children()):
-        if n.type().name() == HDA_NAME.split("::")[-1] and "gero" in n.type().name():
-            n.destroy()
+    # Remove existing build instances
+    for n in list(img.children()):
+        try:
+            if "gero" in n.type().name():
+                n.destroy()
+        except Exception:
+            pass
 
-    # Create base subnet
-    subnet = obj.createNode("subnet", "_dmr_build_base")
+    # Create base cop2net — Cop2 context for proper table registration
+    subnet = img.createNode("cop2net", "_dmr_build_base")
 
-    # Convert to digital asset
+    # Convert to digital asset (registers in Cop2 table)
     hda_def = subnet.createDigitalAsset(
         name=HDA_NAME,
         hda_file_name="Embedded",
@@ -222,32 +227,6 @@ def build_hda():
 
     copnet.layoutChildren()
 
-    # Depth SOP network
-    depth_geo = subnet.createNode("geo", "Depth")
-    for child in list(depth_geo.children()):
-        child.destroy()
-    om = depth_geo.createNode("object_merge", "object_merge1")
-    aw = depth_geo.createNode("attribwrangle", "plane_project")
-    ap1 = depth_geo.createNode("attribpromote", "attribpromote1")
-    ap2 = depth_geo.createNode("attribpromote", "attribpromote2")
-    ar = depth_geo.createNode("attribremap", "attribremap1")
-    cw = depth_geo.createNode("attribwrangle", "color")
-    out = depth_geo.createNode("output", "output0")
-    aw.setInput(0, om)
-    ap1.setInput(0, aw)
-    ap2.setInput(0, ap1)
-    ar.setInput(0, ap2)
-    cw.setInput(0, ar)
-    out.setInput(0, cw)
-    depth_geo.layoutChildren()
-
-    # ROP network
-    ropnet = subnet.createNode("ropnet", "ropnet1")
-    ropnet.createNode("opengl", "opengl1")
-
-    # Ambient light
-    subnet.createNode("ambient", "ambient1")
-
     # ── Add Python Sections ──
     for section_name, content in SCRIPTS.items():
         hda_def.addSection(section_name, content)
@@ -265,9 +244,8 @@ def build_hda():
     print(f"HDA built and installed: {{HDA_FILE}}")
 
     # Verify
-    test = obj.createNode(HDA_NAME, "_dmr_verify")
+    test = img.createNode(HDA_NAME, "_dmr_verify")
     assert test.parm("normalization") is not None, "Parameters missing!"
-    assert len(test.children()) >= 4, "Network contents missing!"
     test.destroy()
 
     print("Verification passed!")

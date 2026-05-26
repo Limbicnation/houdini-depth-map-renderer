@@ -1,8 +1,20 @@
-"""Depth Map Renderer (gero::depth_map_renderer) — Python Panel UI.
-==================================================================
-Thin Qt UI wrapper around the shared core module.
-Provides the user-facing panel; all pipeline logic lives in
-limbic_depth_map_core.py.
+"""DEPRECATED — Depth Map Renderer (gero::depth_map_renderer) — Python Panel UI.
+==============================================================================
+This Python Panel UI is DEPRECATED as of v2.1.0 and will be removed in v3.0.
+
+The limbic_depth_map_renderer HDA now exposes all parameters directly
+on the node's parameter interface. Use the HDA's own parms instead of
+this panel. The shelf tools and HDA PythonModule have been updated to
+import from limbic_depth_map_core.py directly.
+
+This file is kept only for backward compatibility with existing
+.pypanel registrations. It still works but will not receive new
+features (clipping, exposure, gamma, etc.).
+
+Migration:
+  - Replace panel-based workflows with HDA parameter-driven workflows
+  - Import from limbic_depth_map_core instead of depth_map_panel
+  - Shelf tools now import from core; no panel dependency needed
 
 COP2 backend only (H18+).  COP (H21+) backend is gated behind
 _ENABLE_COP_BACKEND and not yet active.

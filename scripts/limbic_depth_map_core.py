@@ -73,7 +73,7 @@ def reset_backend_cache():
 # build_depth_network().
 _NODE_MAP = {
     "source":       {"cop2": "cop2::file",        "cop": "file"},
-    "log":          {"cop2": "cop2::function",    "cop": "function"},
+    "log":          {"cop2": "cop2::ln",           "cop": "function"},
     "range":        {"cop2": "cop2::range",       "cop": "remap"},
     "brightness":   {"cop2": "cop2::brightness",  "cop": "bright"},
     "contrast":     {"cop2": "cop2::contrast",    "cop": "contrast"},
@@ -398,8 +398,12 @@ def build_depth_network(node, settings: dict):
         _set_label(log_node, "Log Normalize")
         log_node.setPosition(hou.Vector2(STEP, 0))
         _wire(log_node, src, be)
-        log_node.parm("func").set(1)
-        log_node.parm("func_math").set(3)
+        if be == "cop":
+            log_node.parm("func").set(1)
+            log_node.parm("func_math").set(3)
+        else:
+            _try(log_node.parm("affectalpha").set, False,
+                 where="log_affectalpha")
 
         rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
         _set_label(rmap, "Log Range Mapper")
