@@ -29,7 +29,7 @@ SRC_ROOT = Path(__file__).parent.resolve()
 HDA_METADATA = {
     "name":            "depth_map_renderer",
     "namespace":       "gero",
-    "table":           "Cop2",
+    "table":           "Object",
     "label":           "Depth Map Renderer",
     "category":        "Limbicnation",
     "version":         (2, 1, 0),
@@ -50,11 +50,9 @@ HDA_METADATA = {
 H21_COP_NODES = {
     "source":      {"type": "file",      "name": "DM_Source",      "label": "Z-Depth Source"},
     "range":       {"type": "remap",     "name": "DM_RangeMap",    "label": "Depth Range Mapper"},
-    "log":         {"type": "function",  "name": "DM_LOG",         "label": "Log Normalize"},
     "brightness":  {"type": "bright",    "name": "DM_Brightness",  "label": "Brightness"},
     "contrast":    {"type": "contrast",  "name": "DM_Contrast",    "label": "Depth Contrast"},
-    "scale":       {"type": "function",  "name": "DM_Scale",       "label": "Depth Scale"},
-    "invert":      {"type": "invert",    "name": "DM_Invert",      "label": "Depth Invert"},
+    "scale":       {"type": "bright",    "name": "DM_Scale",       "label": "Depth Scale"},
     "grayscale":   {"type": "mono",      "name": "DM_Grayscale",   "label": "Grayscale Output"},
     "file_output": {"type": "rop_image", "name": "DM_FileOut",     "label": "Depth File Output"},
     "viewer":      {"type": "output",    "name": "DM_Viewer",      "label": "Depth Viewer"},
@@ -69,7 +67,6 @@ H21_COP_NODES = {
 COP2_COMPAT_NODES = {
     "source":      {"type": "cop2::deep",        "name": "DM_Source",    "label": "Z-Depth Source"},
     "range":       {"type": "cop2::range",        "name": "DM_RangeMap",  "label": "Depth Range Mapper"},
-    "log":         {"type": "cop2::ln",           "name": "DM_LOG",       "label": "Log Normalize"},
     "brightness":  {"type": "cop2::brightness",   "name": "DM_Brightness","label": "Brightness"},
     "contrast":    {"type": "cop2::contrast",     "name": "DM_Contrast",  "label": "Depth Contrast"},
     "scale":       {"type": "cop2::multiply",     "name": "DM_Scale",     "label": "Depth Scale"},
@@ -94,7 +91,8 @@ def _generate_houdini_build_script(output_path: Path) -> Path:
 
     scripts_json = json.dumps(scripts, indent=2)
 
-    cop_nodes_json = json.dumps(H21_COP_NODES, indent=2)
+    h21_nodes_json = json.dumps(H21_COP_NODES, indent=2)
+    cop2_nodes_json = json.dumps(COP2_COMPAT_NODES, indent=2)
 
     hda_file = str(output_path.parent / f"{HDA_METADATA['namespace']}_{HDA_METADATA['name']}.hda")
 
@@ -113,40 +111,55 @@ HDA_LABEL = "{hda_label}"
 HDA_FILE = "{hda_file}"
 SRC_ROOT = "{src_root}"
 
-COP_NODES = {cop_nodes_json}
+H21_COP_NODES = {h21_nodes_json}
+COP2_COMPAT_NODES = {cop2_nodes_json}
 SCRIPTS = {scripts_json}
 
 
 def build_hda():
-    img = hou.node("/img")
-    if img is None:
-        img = hou.node("/obj").createNode("img", "img")
+    ver = hou.applicationVersion()
+    is_h21 = ver[0] >= 21
 
-    # Remove existing build instances
-    for n in list(img.children()):
-        try:
-            if "gero" in n.type().name():
+    # The HDA is an Object subnet (lives in /obj alongside geometry).  Its
+    # image pipeline lives in an inner COP network — copnet on H21 (COP2 was
+    # removed) or cop2net on H18-H20.
+    if is_h21:
+        COP_NODES = H21_COP_NODES
+        cop_container_type = "copnet"
+        print(f"Houdini {{ver[0]}}.{{ver[1]}} — Object HDA, Copernicus inner COP net")
+    else:
+        COP_NODES = COP2_COMPAT_NODES
+        cop_container_type = "cop2net"
+        print(f"Houdini {{ver[0]}}.{{ver[1]}} — Object HDA, legacy COP2 inner net")
+
+    obj = hou.node("/obj")
+
+    # Remove any leftover scratch nodes from a previous build
+    for n in list(obj.children()):
+        if n.name().startswith("_dmr_"):
+            try:
                 n.destroy()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-    # Create base cop2net — Cop2 context for proper table registration
-    subnet = img.createNode("cop2net", "_dmr_build_base")
+    # Object subnet that becomes the asset.
+    base = obj.createNode("subnet", "_dmr_build_base")
 
-    # Convert to digital asset (registers in Cop2 table)
-    hda_def = subnet.createDigitalAsset(
+    # Convert to a digital asset.  createDigitalAsset returns the NEW node
+    # (the original `base` reference is now invalid); fetch the definition
+    # from the new node's type.
+    asset = base.createDigitalAsset(
         name=HDA_NAME,
         hda_file_name="Embedded",
         description=HDA_LABEL,
         min_num_inputs=0,
         max_num_inputs=0,
     )
-
-    # Allow editing
-    subnet.allowEditingOfContents()
+    hda_def = asset.type().definition()
+    asset.allowEditingOfContents()
 
     # Clear default contents
-    for child in list(subnet.children()):
+    for child in list(asset.children()):
         child.destroy()
 
     # ── Build Parameter Interface ──
@@ -161,6 +174,12 @@ def build_hda():
     parm_group.append(p)
 
     depth_folder = hou.FolderParmTemplate("depth_folder", "Depth Settings")
+    depth_folder.addParmTemplate(hou.ToggleParmTemplate("autodepth", "Auto-Render Scene Depth", default_value=True))
+    _cam = hou.StringParmTemplate("camera", "Camera", 1, default_value=[""],
+        string_type=hou.stringParmType.NodeReference)
+    _cam.setTags({{"opfilter": "!!OBJ/CAMERA!!", "oprelative": "."}})
+    _cam.setConditional(hou.parmCondType.DisableWhen, "{{ autodepth == 0 }}")
+    depth_folder.addParmTemplate(_cam)
     depth_folder.addParmTemplate(hou.ToggleParmTemplate("usecustomrange", "Custom Near/Far Range", default_value=False))
     depth_folder.addParmTemplate(hou.FloatParmTemplate("near", "Near", 1, default_value=[0.1]))
     depth_folder.addParmTemplate(hou.FloatParmTemplate("far", "Far", 1, default_value=[1000.0]))
@@ -199,18 +218,48 @@ def build_hda():
     mask_folder.addParmTemplate(hou.StringParmTemplate("maskoutputpath", "Mask Output Path", 1, default_value=[""]))
     parm_group.append(mask_folder)
 
-    hda_def.setParmTemplateGroup(parm_group)
+    actions_folder = hou.FolderParmTemplate("actions_folder", "Actions")
 
-    # ── Build Network Contents ──
-    copnet = subnet.createNode("copnet", "depth_map_cop")
+    btn = hou.ButtonParmTemplate("btn_setup", "Setup Depth Network")
+    btn.setScriptCallback("hou.phm().on_setup(kwargs)")
+    btn.setScriptCallbackLanguage(hou.scriptLanguage.Python)
+    actions_folder.addParmTemplate(btn)
+
+    btn = hou.ButtonParmTemplate("btn_render", "Render Depth Map")
+    btn.setScriptCallback("hou.phm().on_render(kwargs)")
+    btn.setScriptCallbackLanguage(hou.scriptLanguage.Python)
+    actions_folder.addParmTemplate(btn)
+
+    btn = hou.ButtonParmTemplate("btn_render_anim", "Render Animation")
+    btn.setScriptCallback("hou.phm().on_render_animation(kwargs)")
+    btn.setScriptCallbackLanguage(hou.scriptLanguage.Python)
+    actions_folder.addParmTemplate(btn)
+
+    btn = hou.ButtonParmTemplate("btn_setup_mask", "Setup Mask Network")
+    btn.setScriptCallback("hou.phm().on_setup_mask(kwargs)")
+    btn.setScriptCallbackLanguage(hou.scriptLanguage.Python)
+    actions_folder.addParmTemplate(btn)
+
+    btn = hou.ButtonParmTemplate("btn_reset", "Reset Network")
+    btn.setScriptCallback("hou.phm().on_reset(kwargs)")
+    btn.setScriptCallbackLanguage(hou.scriptLanguage.Python)
+    actions_folder.addParmTemplate(btn)
+
+    parm_group.append(actions_folder)
+
+    # ── Build Network Contents (static default pipeline) ──
+    # An Object subnet cannot host COP nodes directly, so the pipeline lives
+    # in an inner COP network named "depth_cop" (must match COP_CONTAINER in
+    # limbic_depth_map_core.py).  The runtime PythonModule rebuilds this on
+    # Setup, so this is just the default contents shown before Setup.
+    cop = asset.createNode(cop_container_type, "depth_cop")
 
     nodes = {{}}
     for key, info in COP_NODES.items():
-        nodes[key] = copnet.createNode(info["type"], info["name"])
+        nodes[key] = cop.createNode(info["type"], info["name"])
 
-    # Wire depth pipeline: source -> invert -> range -> brightness -> contrast -> scale -> grayscale -> fileout -> viewer
-    nodes["invert"].setInput(0, nodes["source"])
-    nodes["range"].setInput(0, nodes["invert"])
+    # Wire depth pipeline
+    nodes["range"].setInput(0, nodes["source"])
     nodes["brightness"].setInput(0, nodes["range"])
     nodes["contrast"].setInput(0, nodes["brightness"])
     nodes["scale"].setInput(0, nodes["contrast"])
@@ -218,33 +267,41 @@ def build_hda():
     nodes["file_output"].setInput(0, nodes["grayscale"])
     nodes["viewer"].setInput(0, nodes["grayscale"])
 
-    # Wire mask pipeline: m_source -> m_idtomask -> m_grayscale / m_rgba -> m_fileout -> m_viewer
-    nodes["m_idtomask"].setInput(0, nodes["m_source"])
-    nodes["m_grayscale"].setInput(0, nodes["m_idtomask"])
-    nodes["m_rgba"].setInput(0, nodes["m_idtomask"])
-    nodes["m_fileout"].setInput(0, nodes["m_grayscale"])
-    nodes["m_viewer"].setInput(0, nodes["m_grayscale"])
+    # Wire mask pipeline (only on backends that ship mask nodes)
+    if "m_source" in COP_NODES:
+        nodes["m_idtomask"].setInput(0, nodes["m_source"])
+        nodes["m_grayscale"].setInput(0, nodes["m_idtomask"])
+        nodes["m_rgba"].setInput(0, nodes["m_idtomask"])
+        nodes["m_fileout"].setInput(0, nodes["m_grayscale"])
+        nodes["m_viewer"].setInput(0, nodes["m_grayscale"])
 
-    copnet.layoutChildren()
+    cop.layoutChildren()
+    asset.layoutChildren()
 
-    # ── Add Python Sections ──
+    # Capture contents into the definition first, THEN apply the parameter
+    # interface and Python sections.  updateFromNode rebuilds the interface
+    # from the node, so setParmTemplateGroup/addSection must come after it.
+    hda_def.updateFromNode(asset)
+    hda_def.setParmTemplateGroup(parm_group)
+
     for section_name, content in SCRIPTS.items():
         hda_def.addSection(section_name, content)
 
-    # ── Save to File ──
-    hda_def.updateFromNode(subnet)
+    # Event-handler scripts are Python, not Hscript
+    hda_def.setExtraFileOption("OnCreated/IsPython", True)
+
     hda_def.copyToHDAFile(HDA_FILE)
 
-    # Clean up build node
-    subnet.destroy()
+    # Clean up scratch asset
+    asset.destroy()
 
     # Install from file
     hou.hda.installFile(HDA_FILE)
 
     print(f"HDA built and installed: {{HDA_FILE}}")
 
-    # Verify
-    test = img.createNode(HDA_NAME, "_dmr_verify")
+    # Verify by instantiating a fresh copy in /obj
+    test = obj.createNode(HDA_NAME, "_dmr_verify")
     assert test.parm("normalization") is not None, "Parameters missing!"
     test.destroy()
 

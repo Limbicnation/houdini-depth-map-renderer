@@ -3,8 +3,8 @@
 Pure pipeline logic shared between the HDA PythonModule and the
 Python Panel UI.  No Qt imports — only hou, os, json, math, sys.
 
-COP2 backend only (H18+).  COP (H21+) backend is gated behind
-_ENABLE_COP_BACKEND and not yet active.
+Dual COP backend: COP2 (H18-H20) and Copernicus / new COP (H21+).
+Backend is auto-detected from the Houdini version at runtime.
 
 Three-layer architecture:
     limbic_depth_map_core.py  (pure logic — this file)
@@ -44,7 +44,9 @@ LAYOUT_MASK_Y = -300
 # COP Backend Detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-_ENABLE_COP_BACKEND = False
+# H21 removed the legacy COP2 network entirely (cop2net / cop2::* node types
+# no longer exist), so on H21+ we must use the new Copernicus COP nodes.
+_ENABLE_COP_BACKEND = True
 
 _COP_BACKEND = None
 
@@ -67,17 +69,19 @@ def reset_backend_cache():
 
 
 # Semantic key → {backend: houdini_type_string}
-# NOTE: "scale" maps to cop2::multiply (has scale1 parm) and cop::function
-# (uses func=0 for multiply, val1a for the multiplier).  The function COP
-# does NOT have a "scale" parm — setting logic is handled in
-# build_depth_network().
+# NOTE: Copernicus (H21 "cop") has no logarithm node and no identity
+# "function", so "scale" multiplies via the Copernicus "bright" node
+# (bright = multiplier, neutral 1.0).  LOG normalization degrades to LINEAR
+# on the cop backend (see build_depth_network).
 _NODE_MAP = {
     "source":       {"cop2": "cop2::file",        "cop": "file"},
+    # "log" is COP2-only; on the cop backend LOG falls back to LINEAR before a
+    # log node is ever created, so the "cop" value here is never used.
     "log":          {"cop2": "cop2::ln",           "cop": "function"},
     "range":        {"cop2": "cop2::range",       "cop": "remap"},
     "brightness":   {"cop2": "cop2::brightness",  "cop": "bright"},
     "contrast":     {"cop2": "cop2::contrast",    "cop": "contrast"},
-    "scale":        {"cop2": "cop2::multiply",    "cop": "function"},
+    "scale":        {"cop2": "cop2::multiply",    "cop": "bright"},
     "grayscale":    {"cop2": "cop2::convert",     "cop": "mono"},
     "file_output":  {"cop2": "cop2::file_output", "cop": "rop_image"},
     "viewer":       {"cop2": "cop2::viewer",      "cop": "output"},
@@ -95,7 +99,12 @@ def _create_node(parent, key, name):
 
 def _set_label(node, label):
     import hou
-    if not _try_ok(node.setLabel, label, where="set_label"):
+    # Copernicus CopNode has no setLabel(); fall back to a comment.  Guard with
+    # hasattr because accessing a missing bound method raises before _try_ok.
+    if hasattr(node, "setLabel") and _try_ok(node.setLabel, label,
+                                             where="set_label"):
+        return
+    if hasattr(node, "setComment"):
         _try_ok(node.setComment, label, where="set_label_comment")
         _try_ok(node.setGenericFlag, hou.nodeFlag.DisplayComment, True,
                 where="set_label_flag")
@@ -103,6 +112,35 @@ def _set_label(node, label):
 
 def _container_type():
     return "copnet" if backend() == "cop" else "cop2net"
+
+
+# The HDA is an Object subnet; its image pipeline lives in this inner COP
+# network.  COP nodes therefore sit two levels below the HDA parms, so
+# reactive channel references reach the HDA via "../../".
+COP_CONTAINER = "depth_cop"
+
+
+def cop_container(node, create=True):
+    """Return the inner COP network that holds the DM_ pipeline.
+
+    The HDA is an Object subnet, which cannot host COP nodes directly, so the
+    pipeline lives in a child copnet/cop2net.  Returns None when absent and
+    create is False.
+    """
+    c = node.node(COP_CONTAINER)
+    if c is None and create:
+        _ensure_editable(node)
+        c = _try(node.createNode, _container_type(), COP_CONTAINER,
+                 where="create_cop_container")
+    return c
+
+
+def _chref(parm_name: str) -> str:
+    """Hscript channel reference from a pipeline COP node up to an HDA parm.
+
+    COP nodes live in the inner copnet, one level below the HDA, hence ../../.
+    """
+    return f'ch("../../{parm_name}")'
 
 
 def _safe_set_display(node, display_node):
@@ -243,7 +281,10 @@ def add_dm_settings_parm(node) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def dm_children(node):
-    return [n for n in node.children() if n.name().startswith(NODE_PREFIX)]
+    cop = cop_container(node, create=False)
+    if cop is None:
+        return []
+    return [n for n in cop.children() if n.name().startswith(NODE_PREFIX)]
 
 
 def output_dir(settings: dict, key: str = "output_path",
@@ -326,6 +367,16 @@ def resolve_script_path(relative_path: str) -> str:
 # COP Network Builders
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ensure_editable(node):
+    """Unlock an HDA instance so its internal COP network can be (re)built.
+
+    HDA instances are locked by default; creating/destroying child nodes
+    raises PermissionError until editing of contents is allowed.
+    """
+    if hasattr(node, "allowEditingOfContents"):
+        _try(node.allowEditingOfContents, where="allow_editing")
+
+
 def _destroy_depth_nodes(node):
     for n in list(dm_children(node)):
         if n.name().startswith(NODE_PREFIX + "M"):
@@ -340,26 +391,66 @@ def _destroy_mask_nodes(node):
         _try(n.destroy, where=f"destroy_mask:{n.name()}")
 
 
-def _set_range_parms(rmap, near, far, inv, be):
+def _set_or_expr(parm, value, expr):
+    """Set a parm to an Hscript expression (reactive) or a literal value.
+
+    When ``expr`` is given the parm references an HDA parameter via ``ch()``
+    so dragging the HDA slider updates the COP node live; otherwise the
+    literal ``value`` is set.
+    """
+    import hou
+    if expr is not None:
+        parm.setExpression(expr, hou.exprLanguage.Hscript)
+    else:
+        parm.set(value)
+
+
+def _set_range_parms(rmap, near, far, inv, be, min_expr=None, max_expr=None):
     if be == "cop":
-        rmap.parm("inputmin").set(near)
-        rmap.parm("inputmax").set(far)
+        _set_or_expr(rmap.parm("inputmin"), near, min_expr)
+        _set_or_expr(rmap.parm("inputmax"), far, max_expr)
         rmap.parm("outputmin").set(1.0 if inv else 0.0)
         rmap.parm("outputmax").set(0.0 if inv else 1.0)
     else:
-        rmap.parm("from_min").set(near)
-        rmap.parm("from_max").set(far)
+        _set_or_expr(rmap.parm("from_min"), near, min_expr)
+        _set_or_expr(rmap.parm("from_max"), far, max_expr)
         rmap.parm("to_min").set(1.0 if inv else 0.0)
         rmap.parm("to_max").set(0.0 if inv else 1.0)
 
 
-def _set_scale_parms(scale_node, sf, be):
+def _set_scale_parms(scale_node, sf, be, expr=None):
     if be == "cop":
-        # H21 function COP: func=0 (multiply), parm name is "scale" not "val1a"
-        scale_node.parm("func").set(0)
-        scale_node.parm("scale").set(sf)
+        # Copernicus "bright" node: bright = multiplier (neutral 1.0), shift = 0
+        scale_node.parm("shift").set(0.0)
+        _set_or_expr(scale_node.parm("bright"), sf, expr)
     else:
-        scale_node.parm("scale1").set(sf)
+        _set_or_expr(scale_node.parm("scale1"), sf, expr)
+
+
+def _prime_cop_source(cop, src_name):
+    """Prepare a Copernicus file-reader source so the chain can cook.
+
+    A Copernicus ``file`` node exposes NO output layers until its AOVs are
+    populated from the image, so a freshly pointed source produces nothing and
+    downstream nodes fail with "source is missing" / "Failed to cook layers".
+    Reload the file and press "Add AOVs from File" to expose the layers.
+
+    Returns False if no file path is set, True if primed, None if N/A.
+    """
+    if cop is None:
+        return None
+    src = cop.node(src_name)
+    if src is None or src.parm("filename") is None:
+        return None
+    fn = src.parm("filename").evalAsString().strip()
+    # "default.pic" is the file COP's placeholder default — treat as unset.
+    if not fn or fn == "default.pic":
+        return False
+    _try(src.parm("reload").pressButton, where="prime_reload")
+    aovs = src.parm("aovs")
+    if aovs is not None and aovs.evalAsInt() == 0:
+        _try(src.parm("addaovs").pressButton, where="prime_addaovs")
+    return True
 
 
 def _set_file_output_parms(fout, upstream, odir, fname, settings, be):
@@ -375,6 +466,9 @@ def _set_file_output_parms(fout, upstream, odir, fname, settings, be):
 def build_depth_network(node, settings: dict):
     import hou
     be = backend()
+    _ensure_editable(node)
+    cop = cop_container(node)
+    _ensure_editable(cop)
     _destroy_depth_nodes(node)
 
     norm = settings.get("normalization", "LINEAR")
@@ -384,7 +478,20 @@ def build_depth_network(node, settings: dict):
     sf = settings.get("scale_factor", 1.0)
     STEP = LAYOUT_STEP_X
 
-    src = _create_node(node, "source", NODE_PREFIX + "Source")
+    # When the HDA exposes explicit parms, wire the COP nodes to them via
+    # ch() expressions so sliders update the network live (no re-Setup).
+    # Otherwise (legacy JSON-only nodes) fall back to literal values.
+    reactive = has_explicit_parms(node)
+
+    # Copernicus (H21) has no logarithm COP node, so LOG normalization
+    # degrades to LINEAR there.  The legacy COP2 backend keeps full LOG.
+    if norm == "LOGARITHMIC" and be == "cop":
+        notify(node, hou.severityType.Warning,
+               "Depth Map: LOG normalization is unavailable on Copernicus "
+               "(H21); falling back to LINEAR.")
+        norm = "LINEAR"
+
+    src = _create_node(cop, "source", NODE_PREFIX + "Source")
     _set_label(src, "Z-Depth Source")
     src.setPosition(hou.Vector2(0, 0))
 
@@ -394,7 +501,7 @@ def build_depth_network(node, settings: dict):
     if norm == "RAW":
         normalize = src
     elif norm == "LOGARITHMIC":
-        log_node = _create_node(node, "log", NODE_PREFIX + "LOG")
+        log_node = _create_node(cop, "log", NODE_PREFIX + "LOG")
         _set_label(log_node, "Log Normalize")
         log_node.setPosition(hou.Vector2(STEP, 0))
         _wire(log_node, src, be)
@@ -405,47 +512,63 @@ def build_depth_network(node, settings: dict):
             _try(log_node.parm("affectalpha").set, False,
                  where="log_affectalpha")
 
-        rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
+        rmap = _create_node(cop, "range", NODE_PREFIX + "RangeMap")
         _set_label(rmap, "Log Range Mapper")
         rmap.setPosition(hou.Vector2(STEP * 2, 0))
-        log_min = 0.0
+        log_min = math.log(max(near, 0.001))
         log_max = math.log(max(far, 0.001))
-        _set_range_parms(rmap, log_min, log_max, inv, be)
+        min_expr = f'log(max({_chref("near")}, 0.001))' if reactive else None
+        max_expr = f'log(max({_chref("far")}, 0.001))' if reactive else None
+        _set_range_parms(rmap, log_min, log_max, inv, be,
+                         min_expr=min_expr, max_expr=max_expr)
         _wire(rmap, log_node, be)
         normalize = rmap
     else:
-        rmap = _create_node(node, "range", NODE_PREFIX + "RangeMap")
+        rmap = _create_node(cop, "range", NODE_PREFIX + "RangeMap")
         _set_label(rmap, "Depth Range Mapper")
         rmap.setPosition(hou.Vector2(STEP, 0))
-        _set_range_parms(rmap, near, far, inv, be)
+        near_expr = _chref("near") if reactive else None
+        far_expr = _chref("far") if reactive else None
+        _set_range_parms(rmap, near, far, inv, be,
+                         min_expr=near_expr, max_expr=far_expr)
         _wire(rmap, src, be)
         normalize = rmap
 
     x = (norm_node_count + 1) * STEP
-    bright = _create_node(node, "brightness", NODE_PREFIX + "Brightness")
+    bright = _create_node(cop, "brightness", NODE_PREFIX + "Brightness")
     _set_label(bright, "Brightness")
     bright.setPosition(hou.Vector2(x, 0))
-    bright.parm("bright" if be == "cop" else "brightness").set(
-        settings.get("brightness", 0.0))
+    # Brightness is additive (neutral 0).  On Copernicus the "bright" parm is a
+    # multiplier (neutral 1.0), so additive brightness goes to "shift" instead.
+    if be == "cop":
+        bright.parm("bright").set(1.0)
+        bright_parm = bright.parm("shift")
+    else:
+        bright_parm = bright.parm("brightness")
+    _set_or_expr(bright_parm, settings.get("brightness", 0.0),
+                 _chref("brightness") if reactive else None)
     _wire(bright, normalize, be)
 
     x += STEP
-    ctr = _create_node(node, "contrast", NODE_PREFIX + "Contrast")
+    ctr = _create_node(cop, "contrast", NODE_PREFIX + "Contrast")
     _set_label(ctr, "Depth Contrast")
     ctr.setPosition(hou.Vector2(x, 0))
-    ctr.parm("contrast" if be == "cop" else "gain").set(
-        1.0 + settings.get("contrast", 0.2))
+    # Contrast parm is gain (1.0 + contrast); offset preserved in expression.
+    _set_or_expr(ctr.parm("contrast" if be == "cop" else "gain"),
+                 1.0 + settings.get("contrast", 0.2),
+                 f'1 + {_chref("contrast")}' if reactive else None)
     _wire(ctr, bright, be)
 
     x += STEP
-    scale = _create_node(node, "scale", NODE_PREFIX + "Scale")
+    scale = _create_node(cop, "scale", NODE_PREFIX + "Scale")
     _set_label(scale, "Depth Scale")
     scale.setPosition(hou.Vector2(x, 0))
-    _set_scale_parms(scale, sf, be)
+    _set_scale_parms(scale, sf, be,
+                     _chref("scalefactor") if reactive else None)
     _wire(scale, ctr, be)
 
     x += STEP
-    gray = _create_node(node, "grayscale", NODE_PREFIX + "Grayscale")
+    gray = _create_node(cop, "grayscale", NODE_PREFIX + "Grayscale")
     _set_label(gray, "Grayscale Output")
     gray.setPosition(hou.Vector2(x, 0))
     if be == "cop2":
@@ -453,69 +576,76 @@ def build_depth_network(node, settings: dict):
     _wire(gray, scale, be)
 
     x += STEP
-    fout = _create_node(node, "file_output", NODE_PREFIX + "FileOut")
+    fout = _create_node(cop, "file_output", NODE_PREFIX + "FileOut")
     _set_label(fout, "Depth File Output")
     fout.setPosition(hou.Vector2(x, 0))
     odir = output_dir(settings, "output_path", "depth_maps")
     fname = filename(settings, "depth_map")
     _set_file_output_parms(fout, gray, odir, fname, settings, be)
-    _wire(fout, gray, be)
+    # Copernicus rop_image reads the COP at "coppath"; it has no image input.
+    if be != "cop":
+        _wire(fout, gray, be)
 
     if settings.get("preview", False):
-        viewer = _create_node(node, "viewer", NODE_PREFIX + "Viewer")
+        viewer = _create_node(cop, "viewer", NODE_PREFIX + "Viewer")
         _set_label(viewer, "Depth Preview")
         viewer.setPosition(hou.Vector2(x, 100))
         _wire(viewer, gray, be)
 
     display = gray if be == "cop" else fout
-    _safe_set_display(node, display)
-    node.layoutChildren()
+    _safe_set_display(cop, display)
+    cop.layoutChildren()
     return fout
 
 
 def build_mask_network(node, settings: dict):
     import hou
     be = backend()
+    _ensure_editable(node)
+    cop = cop_container(node)
+    _ensure_editable(cop)
     _destroy_mask_nodes(node)
 
     source = settings.get("mask_source", "OBJECT_INDEX")
     mfmt = settings.get("mask_format", "GRAYSCALE")
     midx = settings.get("mask_index", 1)
+    reactive = has_explicit_parms(node)
     STEP = LAYOUT_STEP_X
     Y = LAYOUT_MASK_Y
 
     if source == "CRYPTOMATTE":
-        mask_src = _create_node(node, "cryptomatte", NODE_PREFIX + "MSource")
+        mask_src = _create_node(cop, "cryptomatte", NODE_PREFIX + "MSource")
         _set_label(mask_src, "Cryptomatte Source")
         mask_src.setPosition(hou.Vector2(0, Y))
         if be == "cop":
-            mask_input = _create_node(node, "source", NODE_PREFIX + "MaskInput")
+            mask_input = _create_node(cop, "source", NODE_PREFIX + "MaskInput")
             _set_label(mask_input, "Cryptomatte EXR Source — set path")
             mask_input.setPosition(hou.Vector2(-200, Y))
             _wire(mask_src, mask_input, be)
 
     elif be == "cop" and source == "OBJECT_INDEX":
-        mask_input = _create_node(node, "sopimport", NODE_PREFIX + "MaskInput")
+        mask_input = _create_node(cop, "sopimport", NODE_PREFIX + "MaskInput")
         _set_label(mask_input, "SOP Source (set path to your geo)")
         mask_input.setPosition(hou.Vector2(-200, Y))
         _try(mask_input.parm("soppath").set, "",
              where="set_soppath")
 
-        mask_src = _create_node(node, "rasterize", NODE_PREFIX + "MSource")
+        mask_src = _create_node(cop, "rasterize", NODE_PREFIX + "MSource")
         _set_label(mask_src, "Rasterize Geo to Mask")
         mask_src.setPosition(hou.Vector2(0, Y))
         _wire(mask_src, mask_input, be)
 
     else:
-        mask_src = _create_node(node, "idtomask", NODE_PREFIX + "MSource")
+        mask_src = _create_node(cop, "idtomask", NODE_PREFIX + "MSource")
         _set_label(mask_src, "Object Index Mask")
         mask_src.setPosition(hou.Vector2(0, Y))
-        _try(mask_src.parm("object_id").set, midx,
+        _try(_set_or_expr, mask_src.parm("object_id"), midx,
+             _chref("maskindex") if reactive else None,
              where="set_object_id")
 
     x = 300
     if mfmt == "RGBA":
-        convert_ = _create_node(node, "convert_rgba",
+        convert_ = _create_node(cop, "convert_rgba",
                                 NODE_PREFIX + "MRGBA_Convert")
         _set_label(convert_, "RGBA Convert")
         convert_.setPosition(hou.Vector2(x, Y))
@@ -524,7 +654,7 @@ def build_mask_network(node, settings: dict):
         _wire(convert_, mask_src, be)
         mask_out = convert_
     else:
-        mask_out = _create_node(node, "grayscale", NODE_PREFIX + "MGrayscale")
+        mask_out = _create_node(cop, "grayscale", NODE_PREFIX + "MGrayscale")
         _set_label(mask_out, "Grayscale Mask")
         mask_out.setPosition(hou.Vector2(x, Y))
         if be == "cop2":
@@ -532,7 +662,7 @@ def build_mask_network(node, settings: dict):
         _wire(mask_out, mask_src, be)
 
     x += STEP
-    mfout = _create_node(node, "file_output", NODE_PREFIX + "MaskFileOut")
+    mfout = _create_node(cop, "file_output", NODE_PREFIX + "MaskFileOut")
     _set_label(mfout, "Mask File Output")
     mfout.setPosition(hou.Vector2(x, Y))
 
@@ -540,11 +670,12 @@ def build_mask_network(node, settings: dict):
     fname = filename(settings, "mask_map")
     mask_settings = {**settings, "format": "PNG", "bit_depth": "16"}
     _set_file_output_parms(mfout, mask_out, odir, fname, mask_settings, be)
-    _wire(mfout, mask_out, be)
+    if be != "cop":
+        _wire(mfout, mask_out, be)
 
     display = mask_out if be == "cop" else mfout
-    _safe_set_display(node, display)
-    node.layoutChildren()
+    _safe_set_display(cop, display)
+    cop.layoutChildren()
     return mfout
 
 
@@ -572,6 +703,69 @@ def setup_depth(node, mask_only=False) -> bool:
         return False
 
 
+def _resolve_camera(node, settings):
+    """Find the camera to render depth from: the Camera parm, else the first
+    camera in /obj."""
+    import hou
+    cp = (settings.get("camera") or "").strip()
+    if cp:
+        c = node.node(cp) or hou.node(cp)
+        if c is not None:
+            return c
+    obj = hou.node("/obj")
+    if obj is not None:
+        for n in obj.children():
+            if n.type().name() == "cam":
+                return n
+    return None
+
+
+def render_scene_depth(node, settings):
+    """Render the /obj scene's camera-space Z (Pz) to an EXR via Mantra and
+    point DM_Source at it.  Renders the current frame.  Returns the EXR path,
+    or None on failure.
+    """
+    import hou
+    cam = _resolve_camera(node, settings)
+    if cam is None:
+        notify(node, hou.severityType.Error,
+               "Depth Map: no camera found. Set the Camera parameter or add a "
+               "camera to /obj.")
+        return None
+
+    import tempfile
+    odir = output_dir(settings, "output_path", "depth_maps")
+    depth_exr = os.path.join(odir, "_scene_depth.exr")
+    # Mantra requires a main beauty output; it's unused, so park it in temp.
+    beauty = os.path.join(tempfile.gettempdir(), "_dm_scene_beauty.exr")
+
+    out = hou.node("/out")
+    rop = out.createNode("ifd", "_dm_scene_depth")
+    try:
+        rop.parm("camera").set(cam.path())
+        rop.parm("vm_picture").set(beauty)
+        # Camera-space Z depth as its own single-channel file.
+        rop.parm("vm_numaux").set(1)
+        rop.parm("vm_variable_plane1").set("Pz")
+        rop.parm("vm_usefile_plane1").set(True)
+        rop.parm("vm_filename_plane1").set(depth_exr)
+        # Depth needs no anti-aliasing; keep it fast.
+        _try(rop.parm("vm_samplesx").set, 1, where="samplesx")
+        _try(rop.parm("vm_samplesy").set, 1, where="samplesy")
+        rop.render(verbose=False)
+    except Exception as e:
+        notify(node, hou.severityType.Error, f"Depth Map: scene render failed: {e}")
+        return None
+    finally:
+        _try(rop.destroy, where="destroy_scene_depth_rop")
+
+    cop = cop_container(node)
+    src = cop.node(NODE_PREFIX + "Source") if cop else None
+    if src is not None and src.parm("filename") is not None:
+        src.parm("filename").set(depth_exr)
+    return depth_exr
+
+
 def render_depth(node, animation=False, mask=False) -> bool:
     import hou
     try:
@@ -586,7 +780,9 @@ def render_depth(node, animation=False, mask=False) -> bool:
             if not setup_depth(node, mask_only=mask):
                 return False
 
-        fout = node.node(NODE_PREFIX + ("MaskFileOut" if mask else "FileOut"))
+        cop = cop_container(node, create=False)
+        fout = cop.node(NODE_PREFIX + ("MaskFileOut" if mask else "FileOut")) \
+            if cop else None
         if not fout:
             notify(node, hou.severityType.Error,
                    "Depth Map: output node not found - re-run Setup")
@@ -598,11 +794,26 @@ def render_depth(node, animation=False, mask=False) -> bool:
                    f"Depth Map: rendering {len(frames)} {prefix} frames...")
 
         be = backend()
+        # Auto mode (Copernicus depth): render the /obj scene's depth per frame.
+        auto = (be == "cop") and not mask and settings.get("auto_depth", True)
+        # File mode on Copernicus: the source must already point at a depth EXR.
+        if be == "cop" and not mask and not auto:
+            if _prime_cop_source(cop, NODE_PREFIX + "Source") is False:
+                notify(node, hou.severityType.Error,
+                       "Depth Map: no Z-Depth source set. Either enable "
+                       "Auto-Render Scene Depth, or open DM_Source and set its "
+                       "file path to a rendered depth EXR.")
+                return False
+
         odir = output_dir(settings,
                           "mask_output_path" if mask else "output_path",
                           "mask_maps" if mask else "depth_maps")
         for frame in frames:
             hou.setFrame(frame)
+            if auto:
+                if render_scene_depth(node, settings) is None:
+                    return False
+                _prime_cop_source(cop, NODE_PREFIX + "Source")
             fname = filename(settings,
                              "mask_map" if mask else "depth_map",
                              frame=frame)
@@ -625,6 +836,10 @@ def render_depth(node, animation=False, mask=False) -> bool:
 def reset_depth(node, mask_only=False) -> bool:
     import hou
     try:
+        _ensure_editable(node)
+        cop = cop_container(node, create=False)
+        if cop is not None:
+            _ensure_editable(cop)
         children = list(dm_children(node))
         for n in children:
             if mask_only and not n.name().startswith(NODE_PREFIX + "M"):
