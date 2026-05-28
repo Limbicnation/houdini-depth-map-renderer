@@ -16,62 +16,58 @@ Migration:
   - Import from limbic_depth_map_core instead of depth_map_panel
   - Shelf tools now import from core; no panel dependency needed
 
-COP2 backend only (H18+).  COP (H21+) backend is gated behind
-_ENABLE_COP_BACKEND and not yet active.
+Dual COP backend: COP2 (H18-H20) and Copernicus / new COP (H21+),
+auto-detected at runtime.
 
 Both pipelines are independent — mask does NOT require depth.
 """
 
-import json
 import os
 import sys
 
 
-def _find_core_dir() -> str:
-    """Locate the scripts/ directory containing limbic_depth_map_core.py.
+def _ensure_core_importable():
+    """Put limbic_depth_map_core on sys.path for both dev and end-user runs.
 
-    Works in all execution contexts:
-      - Normal file import (__file__ is defined)
-      - Houdini .pypanel CDATA (__file__ is NOT defined)
-      - HDA PythonModule embedded script
+    Dev mode imports from disk (``__file__`` sibling or ``$LIMBIC_DEPTH_MAP``).
+    Otherwise it delegates to the HDA PythonModule's ``_bootstrap_core`` (loaded
+    via ``nodeType.hdaModule()``), which extracts the embedded module sections
+    to a temp dir — a single, shared bootstrap path rather than duplicated here.
     """
-    # 1. Try __file__-based resolution (works for normal imports)
+    # 1. Dev: __file__-relative scripts/
     try:
-        this_dir = os.path.dirname(os.path.abspath(__file__))
-        candidate = os.path.join(this_dir, "..", "scripts")
-        if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
-            return os.path.normpath(candidate)
+        cand = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "scripts"))
+        if os.path.exists(os.path.join(cand, "limbic_depth_map_core.py")):
+            if cand not in sys.path:
+                sys.path.insert(0, cand)
+            return
     except NameError:
         pass
 
-    # 2. Try LIMBIC_DEPTH_MAP environment variable
-    limbic_root = os.environ.get("LIMBIC_DEPTH_MAP", "")
-    if limbic_root:
-        scripts_dir = os.path.join(limbic_root, "scripts")
-        if os.path.exists(os.path.join(scripts_dir, "limbic_depth_map_core.py")):
-            return scripts_dir
+    # 2. Dev: $LIMBIC_DEPTH_MAP/scripts
+    env = os.environ.get("LIMBIC_DEPTH_MAP", "")
+    if env:
+        cand = os.path.join(env, "scripts")
+        if os.path.exists(os.path.join(cand, "limbic_depth_map_core.py")):
+            if cand not in sys.path:
+                sys.path.insert(0, cand)
+            return
 
-    # 3. Try HOUDINI_PATH scan (requires hou, but we're in Houdini)
+    # 3. Self-contained: trigger the HDA PythonModule bootstrap, which adds the
+    #    extracted embedded sources to sys.path.
     try:
         import hou
-        for hp in hou.expandString("$HOUDINI_PATH").split(os.pathsep):
-            candidate = os.path.join(hp, "scripts")
-            if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
-                return candidate
+        nt = hou.nodeType(hou.objNodeTypeCategory(),
+                          "gero::depth_map_renderer")
+        if nt is not None:
+            nt.hdaModule()
     except Exception:
         pass
 
-    # 4. Last resort: relative to CWD
-    candidate = os.path.join(os.getcwd(), "scripts")
-    if os.path.exists(os.path.join(candidate, "limbic_depth_map_core.py")):
-        return candidate
 
-    return os.path.normpath(os.path.join(os.getcwd(), "scripts"))
-
-
-_core_dir = _find_core_dir()
-if _core_dir not in sys.path:
-    sys.path.insert(0, _core_dir)
+_ensure_core_importable()
 
 import hou
 
@@ -80,7 +76,6 @@ from limbic_depth_map_core import (  # noqa: E402
     HDA_CATEGORY,
     DEFAULT_SETTINGS,
     backend,
-    _container_type,
     load_settings,
     save_settings,
     add_dm_settings_parm,
@@ -188,31 +183,15 @@ class OpReset:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
-    """Create a gero::depth_map_renderer COP2 network instance in /img.
+    """Create a gero::depth_map_renderer Object HDA instance in /obj.
 
-    - No hardcoded paths — uses hou.getenv() / hou.expandString().
-    - Auto-creates /img container if missing.
+    - The HDA is an Object subnet; it lives in /obj alongside geometry and
+      hosts its COP pipeline in an inner copnet.
     - Auto-increments name on collision (depth_map1, depth_map2, ...).
     - Wrapped in undo group.
     - Returns the created hou.Node, or None on failure.
     """
-    img = hou.node("/img")
-    if img is None:
-        try:
-            img = hou.node("/obj").createNode("img", "img")
-            img.moveToGoodPosition()
-        except Exception as e:
-            print(f"[Limbic Depth Map] Could not create /img context: {e}",
-                  file=sys.stderr)
-            try:
-                hou.ui.displayMessage(
-                    f"Could not create /img context:\n{e}",
-                    title="Depth Map Spawner",
-                    severity=hou.severityType.Error,
-                )
-            except Exception:
-                pass
-            return None
+    obj = hou.node("/obj")
 
     base = node_name
     if base[-1:].isdigit():
@@ -220,28 +199,17 @@ def spawn_hda(node_name: str = "depth_map") -> "hou.Node | None":
             base = base[:-1]
         base = base or "depth_map"
     counter = 1
-    while img.node(f"{base}{counter}") is not None:
+    while obj.node(f"{base}{counter}") is not None:
         counter += 1
     final_name = f"{base}{counter}"
 
     try:
         with hou.undos.group("Spawn Depth Map HDA"):
-            hda_type = hou.nodeType("Cop2/gero::depth_map_renderer")
-            if hda_type is not None:
-                node = img.createNode("gero::depth_map_renderer", final_name)
-            else:
-                node = img.createNode(_container_type(), final_name)
-                add_dm_settings_parm(node)
-                p = node.parm("dm_settings")
-                if p is not None:
-                    p.set(json.dumps({
-                        "setup_complete": False,
-                        "mask_setup_complete": False,
-                    }))
+            node = obj.createNode("gero::depth_map_renderer", final_name)
             node.moveToGoodPosition()
             node.setSelected(True, clear_all_selected=True)
         hou.ui.setStatusMessage(
-            f"Depth Map: spawned '{final_name}' in /img",
+            f"Depth Map: spawned '{final_name}' in /obj",
             severity=hou.severityType.ImportantMessage,
         )
         return node
@@ -302,18 +270,14 @@ class DepthMapPanel:
         self._ensure_parm()
 
     def _find_hda(self):
-        # Scoped to /img only — avoids O(n) allSubChildren() on heavy scenes
-        img = hou.node("/img")
-        if img is None:
+        # The HDA is an Object node in /obj.  Scoped to /obj's children only
+        # to avoid an O(n) allSubChildren() scan on heavy scenes.
+        obj = hou.node("/obj")
+        if obj is None:
             return None
-        for n in img.children():
+        for n in obj.children():
             try:
-                tname = n.type().name()
-                if tname == "gero::depth_map_renderer":
-                    return n
-                if tname in {"copnet", "cop2net"} and (
-                        n.parm("dm_settings") is not None
-                        or _settings_key(n) in _SETTINGS_STORE):
+                if n.type().name() == "gero::depth_map_renderer":
                     return n
             except Exception:
                 pass
@@ -326,25 +290,18 @@ class DepthMapPanel:
         if self.node is not None:
             self._ensure_parm()
             return True
-        try:
-            img = hou.node("/img")
-            if img is None:
-                img = hou.node("/obj").createNode("img", "img")
-            ctype = _container_type()
-            net = img.createNode(ctype, "depth_map1")
-            net.moveToGoodPosition()
-            self.node = net
+        node = spawn_hda("depth_map")
+        if node is not None:
+            self.node = node
             self._ensure_parm()
             return True
-        except Exception as e:
-            be = backend()
-            ctype = _container_type()
-            ver = hou.applicationVersionString()
-            hou.ui.displayMessage(
-                f"Could not create Depth Map network:\n{e}\n\n"
-                f"Debug: backend={be}, container={ctype}, houdini={ver}",
-                severity=hou.severityType.Error)
-            return False
+        be = backend()
+        ver = hou.applicationVersionString()
+        hou.ui.displayMessage(
+            "Could not create Depth Map HDA — is it installed?\n\n"
+            f"Debug: backend={be}, houdini={ver}",
+            severity=hou.severityType.Error)
+        return False
 
     def _ensure_parm(self):
         if self.node is None:

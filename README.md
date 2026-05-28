@@ -26,9 +26,123 @@ Then in Houdini: **File → Import → HDA File** → select the `.hda`.
 
 ### Use via HDA Node
 
-1. In `/img`, create a **Depth Map Renderer** HDA
+1. In `/obj`, create a **Depth Map Renderer** HDA (it sits alongside your geometry)
 2. Set parameters on the node
-3. Use shelf tools or scripts to Setup/Render/Reset
+3. Use the node's **Actions** buttons (or shelf tools / scripts) to Setup/Render/Reset
+
+---
+
+## Rendering
+
+### Depth source: auto-render or file
+
+The HDA has two modes, controlled by the **Auto-Render Scene Depth** toggle:
+
+- **Auto (default)** — on Render, the HDA renders the `/obj` scene's camera-space
+  Z depth (Mantra `Pz`) from the chosen **Camera** to a temp EXR, then processes
+  it. One-click depth straight from your scene geometry; no pre-render needed.
+  If the **Camera** parm is empty, the first camera in `/obj` is used.
+- **File** — turn the toggle off and point `DM_Source` (inside the inner
+  `depth_cop` network) at your own pre-rendered depth **EXR**.
+
+### Single frame via Python
+
+```python
+# Create the HDA in /obj (Object-level node, alongside your scene geometry)
+dmr = hou.node("/obj").createNode("gero::depth_map_renderer", "depth_renderer")
+
+# Auto-render scene depth from a camera (the default)
+dmr.parm("autodepth").set(True)
+dmr.parm("camera").set("/obj/cam1")        # or leave empty to auto-pick
+
+# Set output directory (defaults to $HIP/depth_maps/ if empty)
+dmr.parm("outputpath").set("$HIP/render/depth_output")
+
+# Configure
+dmr.parm("near").set(1.0); dmr.parm("far").set(50.0)  # scene depth range
+dmr.parm("normalization").set("LINEAR")   # LINEAR, LOGARITHMIC, or RAW
+dmr.parm("invert").set(True)              # near=white, far=black
+dmr.parm("format").set("PNG")             # PNG, TIFF, or EXR
+dmr.parm("bitdepth").set("16")            # 8 or 16 bit
+
+# Render (Setup runs automatically on create; sliders are already live)
+dmr.hm().render_depth(dmr)
+```
+
+> `hm()` is shorthand for `hou.Node.hdaModule()` — it returns the HDA's embedded
+> Python module. It only works on an installed HDA instance; calling it on a
+> plain (non-HDA) node raises `AttributeError`.
+
+Output: `$HIP/render/depth_output/depth_map_0001.png`
+
+### Animation
+
+```python
+dmr.parm("animation").set(True)
+dmr.parm("usescenerange").set(True)       # uses scene frame range
+# Or set manually:
+dmr.parm("framestart").set(1)
+dmr.parm("frameend").set(250)
+
+dmr.hm().render_depth(dmr, animation=True)
+```
+
+### Mask export
+
+Independent from depth — export object masks for ComfyUI:
+
+```python
+dmr.parm("maskenabled").set(True)
+dmr.parm("maskindex").set(1)              # Object Pass Index
+dmr.parm("maskformat").set("GRAYSCALE")   # GRAYSCALE or RGBA
+dmr.parm("maskoutputpath").set("$HIP/mask_maps/")
+
+dmr.hm().setup_depth(dmr, mask_only=True)
+dmr.hm().render_depth(dmr, mask=True)
+```
+
+Set the Object Pass Index on your geometry: **Properties → Relations → Pass Index**.
+
+### What happens internally
+
+The HDA is an **Object subnet** (lives in `/obj`). Its image pipeline lives in an
+inner COP network named `depth_cop`. `render_depth()` builds this chain there:
+
+```
+/obj/<hda>/depth_cop/
+  DM_Source (reads your Z-depth EXR)
+  → DM_RangeMap (maps near/far to 0–1)
+  → DM_Brightness → DM_Contrast → DM_Scale
+  → DM_Grayscale
+  → DM_FileOut (writes PNG/TIFF/EXR)
+```
+
+Then it cooks `DM_FileOut` per frame with the output path set.
+
+### Live (reactive) parameters
+
+The depth network is built automatically when you create the HDA, so the
+**Near**, **Far**, **Brightness**, **Contrast**, **Scale Factor**, and
+**Object Index** parameters are wired to the COP nodes with `ch()` expressions
+and are **live immediately** — dragging a slider updates the network without
+clicking Setup. Structural changes (Normalization, Format, Mask Source) change
+the node graph, so they still require a **Setup** click to rebuild.
+
+The HDA is **self-contained**: its Python core is embedded in the asset, so it
+works with no `LIMBIC_DEPTH_MAP` env var and no external files. (Setting
+`LIMBIC_DEPTH_MAP` is only useful for live development of the core scripts.)
+
+### Houdini 21 (Copernicus) notes
+
+- The HDA is an **Object asset in `/obj`** on all versions. On H21+ its inner
+  `depth_cop` network uses **Copernicus** COP nodes; on H18-H20 it uses legacy
+  COP2 nodes — auto-detected at runtime.
+- **LOGARITHMIC** normalization is unavailable on Copernicus (it has no logarithm
+  COP node) and falls back to LINEAR with a warning. The H18-H20 COP2 backend
+  keeps full LOG support.
+- On COP2, LOG now maps the range from `log(near)`..`log(far)` (previously the
+  minimum was hardcoded to `0`), so **`near` affects LOG mode** — re-Setup an
+  existing LOG scene to pick up the corrected mapping.
 
 ---
 

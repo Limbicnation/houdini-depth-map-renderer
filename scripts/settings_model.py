@@ -19,6 +19,8 @@ def _parm_label(field_name: str) -> str:
 
 @dataclass
 class DepthMapSettings:
+    auto_depth: bool = True
+    camera: str = ""
     use_custom_range: bool = False
     near: float = 0.1
     far: float = 1000.0
@@ -76,6 +78,8 @@ class DepthMapSettings:
 
 
 _PARM_LABELS = {
+    "auto_depth":       "Auto-Render Scene Depth",
+    "camera":           "Camera",
     "use_custom_range": "Custom Near/Far Range",
     "near":             "Near",
     "far":              "Far",
@@ -110,6 +114,7 @@ _MENU_ITEMS = {
 _INTERNAL_FIELDS = {"setup_complete", "mask_setup_complete"}
 
 _PARM_NAME_MAP = {
+    "auto_depth":       "autodepth",
     "use_custom_range": "usecustomrange",
     "scale_factor":     "scalefactor",
     "use_scene_range":  "usescenerange",
