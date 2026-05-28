@@ -468,6 +468,10 @@ def build_depth_network(node, settings: dict):
     be = backend()
     _ensure_editable(node)
     cop = cop_container(node)
+    if cop is None:
+        raise RuntimeError(
+            "Could not create COP container inside the HDA. "
+            "Is the gero::depth_map_renderer HDA installed?")
     _ensure_editable(cop)
     _destroy_depth_nodes(node)
 
@@ -603,6 +607,10 @@ def build_mask_network(node, settings: dict):
     be = backend()
     _ensure_editable(node)
     cop = cop_container(node)
+    if cop is None:
+        raise RuntimeError(
+            "Could not create COP container inside the HDA. "
+            "Is the gero::depth_map_renderer HDA installed?")
     _ensure_editable(cop)
     _destroy_mask_nodes(node)
 
