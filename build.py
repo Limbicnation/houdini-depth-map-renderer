@@ -158,6 +158,12 @@ def build_hda():
     hda_def = asset.type().definition()
     asset.allowEditingOfContents()
 
+    # Ensure dm_settings is empty so OnCreated's setup_complete check works
+    # correctly for new instances (prevent stale defaults from build node).
+    _dm = asset.parm("dm_settings")
+    if _dm is not None:
+        _dm.set("")
+
     # Clear default contents
     for child in list(asset.children()):
         child.destroy()

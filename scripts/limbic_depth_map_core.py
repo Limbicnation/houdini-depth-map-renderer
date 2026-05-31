@@ -321,7 +321,11 @@ def filename(settings: dict, prefix: str, frame=None) -> str:
 def frame_range(settings: dict):
     import hou
     if settings.get("use_scene_range", True):
-        r = hou.playbar.playbackRange()
+        # Global animation range (the whole timeline) — NOT playbackRange(),
+        # which is only the in/out loop subset and would silently truncate the
+        # render to the scrub region (e.g. 1-9).  To render an explicit
+        # subrange, untick "Use Scene Frame Range" and set Start/End.
+        r = hou.playbar.frameRange()
         return range(int(r[0]), int(r[1]) + 1)
     return range(settings.get("frame_start", 1), settings.get("frame_end", 250) + 1)
 
@@ -446,9 +450,21 @@ def _prime_cop_source(cop, src_name):
     # "default.pic" is the file COP's placeholder default — treat as unset.
     if not fn or fn == "default.pic":
         return False
-    _try(src.parm("reload").pressButton, where="prime_reload")
+    # (Re)sync the AOV layer bindings to the CURRENT file.  Only re-adding when
+    # the count is zero is not enough: a binding left over from a previously
+    # loaded file (e.g. a multi-layer File-mode EXR, then switched to Auto's
+    # single-channel _scene_depth.exr) keeps the AOV count non-zero while still
+    # pointing at layers the new file lacks, so the downstream rop_image fails to
+    # cook with "Failed to cook layers".  Clearing the count first, then
+    # reloading and re-adding from the file, deterministically rebinds to
+    # whatever the current file actually contains.  (Verified on H21: this heals
+    # a stale 2-AOV binding down to the correct single AOV and the chain cooks;
+    # "Add AOVs from File" is itself idempotent, so this never stacks AOVs.)
     aovs = src.parm("aovs")
-    if aovs is not None and aovs.evalAsInt() == 0:
+    if aovs is not None:
+        _try(aovs.set, 0, where="prime_clear_aovs")
+    _try(src.parm("reload").pressButton, where="prime_reload")
+    if src.parm("addaovs") is not None:
         _try(src.parm("addaovs").pressButton, where="prime_addaovs")
     return True
 
@@ -457,6 +473,21 @@ def _set_file_output_parms(fout, upstream, odir, fname, settings, be):
     if be == "cop":
         fout.parm("coppath").set(upstream.path())
         fout.parm("copoutput").set(os.path.join(odir, fname))
+        # The Copernicus rop_image defaults (8-bit + OCIO transform) wreck a
+        # depth map: 8-bit dithering of a narrow value band shows up as a
+        # halftone, and the OCIO display transform brightens/bends the linear
+        # depth.  Write the values straight at >=16-bit instead.
+        fmt = settings.get("format", "PNG").upper()
+        cc = fout.parm("colorconversion")
+        if cc is not None:
+            _try(cc.set, "raw", where="fout_colorconversion_raw")
+        sp = fout.parm("setprecision")
+        pr = fout.parm("precision")
+        if sp is not None and pr is not None:
+            _try(sp.set, 1, where="fout_setprecision")
+            # 32-bit float for EXR; 16-bit for PNG/TIFF (8-bit would band).
+            _try(pr.set, "b32" if fmt == "EXR" else "b16",
+                 where="fout_precision")
     else:
         fout.parm("file").set(os.path.join(odir, fname))
         fout.parm("filetype").set(settings.get("format", "PNG").lower())
@@ -498,6 +529,25 @@ def build_depth_network(node, settings: dict):
     src = _create_node(cop, "source", NODE_PREFIX + "Source")
     _set_label(src, "Z-Depth Source")
     src.setPosition(hou.Vector2(0, 0))
+    # Read the depth EXR as raw data, not a colour image.  The Copernicus file
+    # COP defaults to OCIO colour management ("ocio"), which would transform
+    # the linear Z values; "raw" passes them through untouched.  (The parm is
+    # named "colorspace" — there is no "rawchannel" parm on this node.)
+    if be == "cop":
+        cs = src.parm("colorspace")
+        if cs is not None:
+            _try(cs.set, "raw", where="src_colorspace_raw")
+    # If auto-depth is on and a previous scene render exists, repoint the
+    # source so the user isn't left with default.pic after a Reset+Setup.
+    if settings.get("auto_depth", True):
+        depth_exr = os.path.join(
+            output_dir(settings, "output_path", "depth_maps"),
+            "_scene_depth.exr")
+        if os.path.exists(depth_exr):
+            src.parm("filename").set(depth_exr)
+    # If the source already points at a file (e.g. preserved instance after
+    # definition update), reload AOVs so downstream nodes can cook.
+    _prime_cop_source(cop, NODE_PREFIX + "Source")
 
     norm_steps = {"RAW": 0, "LINEAR": 1, "LOGARITHMIC": 2}
     norm_node_count = norm_steps.get(norm, 1)
@@ -728,6 +778,79 @@ def _resolve_camera(node, settings):
     return None
 
 
+def _auto_fit_depth_range(node, cam, settings):
+    """Set Near/Far from the scene's actual camera-space depth.
+
+    Mantra's Pz is positive camera-space distance (verified on H21).  We
+    bracket every renderable /obj object by transforming its bounding-box
+    corners into camera space and taking the min/max positive depth, then write
+    the HDA ``near`` / ``far`` parms.  The Depth Range Mapper references those
+    parms via ``ch()``, so the live network re-ranges automatically.
+
+    No-op when the user enabled Custom Near/Far, when the parms are absent
+    (legacy JSON-only nodes), or when no renderable geometry is found.
+    """
+    import hou
+    if settings.get("use_custom_range", False):
+        return
+    near_p, far_p = node.parm("near"), node.parm("far")
+    if near_p is None or far_p is None:
+        return
+    wt = _try(cam.worldTransform, where="autofit_cam_xform")
+    if wt is None:
+        return
+    wtc = wt.inverted()
+
+    dmin = dmax = None
+    obj = hou.node("/obj")
+    for n in (obj.children() if obj else []):
+        if n == node or n == cam:
+            continue
+        if not hasattr(n, "renderNode"):
+            continue
+        rn = _try(n.renderNode, where="autofit_render_node")
+        if rn is None:
+            continue
+        geo = _try(rn.geometry, where="autofit_geo")
+        if geo is None:
+            continue
+        bb = _try(geo.boundingBox, where="autofit_bbox")
+        if bb is None or not _try(bb.isValid, where="autofit_valid",
+                                  default=False):
+            continue
+        otw = _try(n.worldTransform, where="autofit_obj_xform")
+        if otw is None:
+            continue
+        mn, mx = bb.minvec(), bb.maxvec()
+        for cx in (mn[0], mx[0]):
+            for cy in (mn[1], mx[1]):
+                for cz in (mn[2], mx[2]):
+                    # local -> world -> camera; +depth is in front of camera.
+                    pc = (hou.Vector3(cx, cy, cz) * otw) * wtc
+                    depth = -pc[2]
+                    if depth <= 0.0:
+                        continue
+                    dmin = depth if dmin is None else min(dmin, depth)
+                    dmax = depth if dmax is None else max(dmax, depth)
+
+    if dmin is None or dmax is None:
+        return
+    # Flat-depth scenes (a plane perpendicular to the camera) collapse to a
+    # single distance; give them a tiny valid band instead of bailing to the
+    # 0.1/1000 defaults.
+    if dmax <= dmin:
+        dmax = dmin + 0.01
+    # Small padding so silhouette extremes don't clip to pure black/white.
+    pad = max((dmax - dmin) * 0.02, 1e-4)
+    near = max(dmin - pad, 1e-4)
+    far = dmax + pad
+    _try(near_p.set, near, where="autofit_set_near")
+    _try(far_p.set, far, where="autofit_set_far")
+    notify(node, hou.severityType.Message,
+           f"Depth Map: auto-fitted Near={near:.2f} Far={far:.2f} "
+           f"(enable Custom Near/Far to override)")
+
+
 def render_scene_depth(node, settings):
     """Render the /obj scene's camera-space Z (Pz) to an EXR via Mantra and
     point DM_Source at it.  Renders the current frame.  Returns the EXR path,
@@ -742,10 +865,20 @@ def render_scene_depth(node, settings):
         return None
 
     import tempfile
-    odir = output_dir(settings, "output_path", "depth_maps")
-    depth_exr = os.path.join(odir, "_scene_depth.exr")
-    # Mantra requires a main beauty output; it's unused, so park it in temp.
-    beauty = os.path.join(tempfile.gettempdir(), "_dm_scene_beauty.exr")
+    # The per-frame depth pass is a transient intermediate, not a deliverable.
+    # Writing it into the user's output folder is unsafe when that folder is
+    # watched by a file-sync client (QNAP Qsync, Dropbox, OneDrive, ...): the
+    # client races the renderer to upload/dehydrate the file it just saw change,
+    # which surfaces as an intermittent "Failed to cook layers" partway through
+    # an animation (and leaves 0-byte / stub files behind).  Park both
+    # transients in a private, per-node temp dir; only the final image lands in
+    # the output folder.
+    tmp = os.path.join(tempfile.gettempdir(), f"limbic_depth_{node.sessionId()}")
+    if not os.path.isdir(tmp):
+        _try(os.makedirs, tmp, where="mk_tmpdir", exist_ok=True)
+    depth_exr = os.path.join(tmp, "_scene_depth.exr")
+    # Mantra requires a main beauty output; it's unused, so park it in temp too.
+    beauty = os.path.join(tmp, "_dm_scene_beauty.exr")
 
     out = hou.node("/out")
     rop = out.createNode("ifd", "_dm_scene_depth")
@@ -757,9 +890,53 @@ def render_scene_depth(node, settings):
         rop.parm("vm_variable_plane1").set("Pz")
         rop.parm("vm_usefile_plane1").set(True)
         rop.parm("vm_filename_plane1").set(depth_exr)
+        # Harden the Pz aux plane so the depth survives intact (verified on
+        # H21 Mantra — the defaults bake it as a 3-channel half-float "color"
+        # image in lin_rec709, which mangles the linear Z values):
+        #   float vextype + float quantize  -> single-channel 32-bit, no
+        #       half-float precision loss or inf overflow on large depths
+        #   channel "C"                     -> lands on the default layer the
+        #       Copernicus reader picks up (read as raw, see build_depth_network)
+        #   dither 0 / gamma 1.0            -> depth is data, not a display image
+        #   sfilter closest + pfilter       -> crisp silhouettes; no Gaussian
+        #       "minmax min"                   averaging of depth across object
+        #                                      edges (the edge-fringe artifact)
+        for pname, pval in (
+            ("vm_vextype_plane1", "float"),
+            ("vm_channel_plane1", "C"),
+            ("vm_quantize_plane1", "float"),
+            ("vm_dither_plane1", 0),
+            ("vm_gamma_plane1", 1.0),
+            ("vm_sfilter_plane1", "closest"),
+            ("vm_pfilter_plane1", "minmax min"),
+        ):
+            p = rop.parm(pname)
+            if p is not None:
+                _try(p.set, pval, where=f"set_{pname}")
         # Depth needs no anti-aliasing; keep it fast.
         _try(rop.parm("vm_samplesx").set, 1, where="samplesx")
         _try(rop.parm("vm_samplesy").set, 1, where="samplesy")
+        # Pin the ROP explicitly to the current frame.  render() already honors
+        # the ROP's trange (a fresh ifd defaults to trange=0 = "current frame"),
+        # so this is defensive/clarifying rather than a fix — it guarantees the
+        # per-frame loop drives the frame via hou.setFrame() and never inherits
+        # a stale "render frame range" trange from elsewhere.
+        cur = int(hou.frame())
+        for pname, val in (("f1", cur), ("f2", cur), ("f3", 1)):
+            p = rop.parm(pname)
+            if p is not None:
+                _try(p.set, val, where=f"set_{pname}")
+        # Render Mantra in the FOREGROUND (blocking).  In an interactive GUI
+        # session the ifd ROP otherwise dispatches mantra as a *background*
+        # process and rop.render() returns in ~0.3 s — long before the EXR is
+        # written.  DM_Source would then read an empty/partial file ("source is
+        # missing"), or, across an animation, the loop races ahead of mantra and
+        # every frame reads the same stale EXR (identical frames that stall).
+        # Forcing foreground makes render() block until the depth EXR is
+        # complete.  (hython already renders inline, so this is a no-op there.)
+        p = rop.parm("soho_foreground")
+        if p is not None:
+            _try(p.set, 1, where="set_soho_foreground")
         rop.render(verbose=False)
     except Exception as e:
         notify(node, hou.severityType.Error, f"Depth Map: scene render failed: {e}")
@@ -813,27 +990,67 @@ def render_depth(node, animation=False, mask=False) -> bool:
                        "file path to a rendered depth EXR.")
                 return False
 
+        # Auto-fit Near/Far ONCE per render (not per frame): the default
+        # 0.1/1000 range crushes typical scene depth into the top few percent of
+        # the remap (near-uniform white that dithers to a halftone).  Computing
+        # it once gives a stable, flicker-free range across the whole sequence.
+        # No-op when Custom Near/Far is on or no renderable geometry is found.
+        if auto:
+            cam = _resolve_camera(node, settings)
+            if cam is not None:
+                _auto_fit_depth_range(node, cam, settings)
+
         odir = output_dir(settings,
                           "mask_output_path" if mask else "output_path",
                           "mask_maps" if mask else "depth_maps")
-        for frame in frames:
+        ok_count = 0
+        for idx, frame in enumerate(frames):
             hou.setFrame(frame)
+            if animation:
+                notify(node, hou.severityType.Message,
+                       f"Depth Map: {prefix} frame {int(frame)} "
+                       f"({idx + 1}/{len(frames)})")
             if auto:
                 if render_scene_depth(node, settings) is None:
-                    return False
+                    notify(node, hou.severityType.Warning,
+                           f"Depth Map: frame {int(frame)} depth render "
+                           f"failed, skipping")
+                    continue
                 _prime_cop_source(cop, NODE_PREFIX + "Source")
             fname = filename(settings,
                              "mask_map" if mask else "depth_map",
                              frame=frame)
             if be == "cop":
                 fout.parm("copoutput").set(os.path.join(odir, fname))
-                fout.render()
+                # Pin rop_image explicitly to the current frame (defensive — the
+                # loop already drives the frame via hou.setFrame()).
+                cur = int(hou.frame())
+                for pname, val in (("f1", cur), ("f2", cur), ("f3", 1)):
+                    p = fout.parm(pname)
+                    if p is not None:
+                        _try(p.set, val, where=f"set_fout_{pname}")
+                # Guard the output cook: a Copernicus "Failed to cook layers"
+                # raise must skip this frame, not abort the whole sequence (the
+                # render_scene_depth guard above does not cover this call).
+                rendered = _try_ok(fout.render, where=f"fout_render_f{int(frame)}")
             else:
                 fout.parm("file").set(os.path.join(odir, fname))
-                fout.cook(force=True)
+                rendered = _try_ok(fout.cook, force=True,
+                                   where=f"fout_cook_f{int(frame)}")
+            if not rendered:
+                notify(node, hou.severityType.Warning,
+                       f"Depth Map: frame {int(frame)} output cook failed, "
+                       f"skipping")
+                continue
+            ok_count += 1
 
+        if ok_count == 0:
+            notify(node, hou.severityType.Error,
+                   f"Depth Map: all {prefix} frames failed")
+            return False
         notify(node, hou.severityType.ImportantMessage,
-               f"Depth Map: rendered {len(frames)} {prefix} frame(s) -> {odir}")
+               f"Depth Map: rendered {ok_count}/{len(frames)} "
+               f"{prefix} frame(s) -> {odir}")
         return True
 
     except Exception as e:
